@@ -6,6 +6,7 @@ import scipy.stats
 import scipy.optimize as opt
 import scipy.interpolate as interp
 from scipy.stats import norm
+from scipy.optimize import minimize
 
 def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
     """
@@ -316,6 +317,7 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     evals : array-like
         sample covariance matrix の非ゼロ固有値。
         降順でなくてもよい。
+        -> 訂正：もとの行列の特異値
     p : int
         次元。Y が p x n のデータ行列なら p = Y.shape[0]。
     n : int
@@ -372,10 +374,10 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
         * (1 + np.sqrt(gamma)) ** (4 / 3)
     )
 
-    K_hat = int(np.sum(evals_sorted > threshold))
+    s_hat = int(np.sum(evals_sorted > threshold))
 
     return {
-        "K_hat": K_hat,
+        "s_hat": s_hat,
         "sigma2_hat": sigma2_hat,
         "threshold": threshold,
         "gamma": gamma,
@@ -421,3 +423,72 @@ def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
         alpha=alpha,
         beta=beta
     )
+
+def gaussian_broadening_fit(evals, gamma_ratio, a=10):
+    """
+    論文のセクション2.3に基づく Gaussian Broadening と最小二乗法による sigma^2 の推定
+    """
+    m = len(evals)
+    evals_sorted = np.sort(evals)
+    
+    # 1. 局所標準偏差 sigma_k の計算
+    sigma_k = np.zeros(m)
+    for k in range(m):
+        k_minus = max(0, k - a)
+        k_plus = min(m - 1, k + a)
+        # ウィンドウ幅 2a に基づく局所的な間隔
+        sigma_k[k] = (evals_sorted[k_plus] - evals_sorted[k_minus]) / 2.0
+        
+        # 同値が連続した場合のゼロ除算エラーを防ぐ安全策
+        if sigma_k[k] < 1e-8:
+            sigma_k[k] = 1e-8 
+
+    # 2. 平滑化された経験的密度 P(gamma) の定義
+    def P_gamma(x):
+        x = np.atleast_1d(x)
+        # x と evals_sorted の全組み合わせの差分 (N, M) 行列を計算
+        diff = x[:, None] - evals_sorted[None, :]
+        exponent = - (diff ** 2) / (2 * sigma_k[None, :] ** 2)
+        coef = 1.0 / (np.sqrt(2 * np.pi) * sigma_k[None, :])
+        # 各 x について m 個のガウス関数の平均をとる
+        return np.mean(coef * np.exp(exponent), axis=1)
+
+    # 3. MP分布 g(gamma) の定義
+    def mp_pdf(x, sigma2):
+        x = np.atleast_1d(x)
+        lambda_plus = sigma2 * (1 + np.sqrt(gamma_ratio))**2
+        lambda_minus = sigma2 * (1 - np.sqrt(gamma_ratio))**2
+        
+        pdf = np.zeros_like(x)
+        valid = (x > lambda_minus) & (x < lambda_plus)
+        if np.any(valid):
+            pdf[valid] = np.sqrt((lambda_plus - x[valid]) * (x[valid] - lambda_minus)) / (2 * np.pi * gamma_ratio * sigma2 * x[valid])
+        return pdf
+
+    # 4. 最小二乗法のための目的関数の定義
+    # フィッティング範囲: スパイクの影響を排除するため、下位 90% のバルク領域でカーブを比較する
+    limit_idx = int(m * 0.90)
+    x_eval = np.linspace(max(1e-5, evals_sorted[0]), evals_sorted[limit_idx], 200)
+    P_val = P_gamma(x_eval) # 平滑化された経験的密度
+
+    def objective(sigma2_val):
+        sigma2_val = sigma2_val[0]
+        if sigma2_val <= 0:
+            return np.inf
+        g_val = mp_pdf(x_eval, sigma2_val)
+        # [P(gamma_i) - g(gamma_i)]^2 の和
+        return np.sum((P_val - g_val)**2)
+
+    # 5. 最適化の実行
+    # 初期値としてバルクの平均値を仮置き
+    initial_sigma2 = np.mean(evals_sorted[:limit_idx])
+    res = minimize(objective, x0=[initial_sigma2], bounds=[(1e-5, None)])
+    
+    sigma2_hat = res.x[0]
+    
+    return {
+        "sigma2_hat": sigma2_hat,
+        "P_gammna": P_gamma,
+        "mp.pdf":mp_pdf,
+        "x_eval":x_eval
+    }
