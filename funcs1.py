@@ -409,11 +409,11 @@ def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
     p, n = Y.shape
 
     if p <= n:
-        S = Y @ Y.T / n
+        S = Y @ Y.T
         evals = np.linalg.eigvalsh(S)
     else:
         # 非ゼロ固有値だけなら Y^T Y / n の固有値を使えばよい
-        S_small = Y.T @ Y / n
+        S_small = Y.T @ Y
         evals = np.linalg.eigvalsh(S_small)
 
     return bema_algorithm1_from_eigenvalues(
