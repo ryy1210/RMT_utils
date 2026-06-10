@@ -416,8 +416,10 @@ def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
         S_small = Y.T @ Y
         evals = np.linalg.eigvalsh(S_small)
 
+    sv = np.sqrt(evals)
+
     return bema_algorithm1_from_eigenvalues(
-        evals=evals,
+        evals=sv, #特異値を渡す
         p=p,
         n=n,
         alpha=alpha,
