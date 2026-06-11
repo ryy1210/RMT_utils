@@ -5,8 +5,9 @@ import numpy as np
 import scipy.stats
 import scipy.optimize as opt
 import scipy.interpolate as interp
+from scipy import integrate
 from scipy.stats import norm
-from scipy.optimize import minimize
+from scipy.optimize import minimize, root_scalar
 
 def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
     """
@@ -307,6 +308,40 @@ def mp_upper_quantiles(gamma, p_tilde, k_indices, grid_size=200000):
     q = inv_cdf(cdf_targets)
     return q
 
+def qmp_python(p, var, gamma):
+    """
+    R の qmp 関数 (Marchenko-Pastur の分位関数・逆CDF) の Python 実装
+    p: 求めたいパーセンタイル (0 から 1 の間の確率)
+    var: 分散 (ここでは標準化された 1.0 を想定)
+    gamma: アスペクト比 (m/n または p/n)
+    """
+    lambda_minus = var * (1 - np.sqrt(gamma))**2
+    lambda_plus = var * (1 + np.sqrt(gamma))**2
+
+    # MP分布の確率密度関数 (PDF)
+    def mp_pdf(x):
+        if x < lambda_minus or x > lambda_plus:
+            return 0.0
+        return np.sqrt((lambda_plus - x) * (x - lambda_minus)) / (2 * np.pi * gamma * var * x)
+
+    # 累積分布関数 (CDF) を数値積分で定義
+    def mp_cdf(x):
+        res, _ = integrate.quad(mp_pdf, lambda_minus, x, limit=100)
+        return res
+
+    # 求めたい分位数における方程式 CDF(x) - p = 0 を解く
+    def obj_func(x):
+        return mp_cdf(x) - p
+
+    # root_scalar を用いて解を探索
+    try:
+        res = root_scalar(obj_func, bracket=[lambda_minus, lambda_plus], method='brentq')
+        return res.root
+    except ValueError:
+        # 計算誤差で解が見つからない場合の安全策
+        if p <= 0: return lambda_minus
+        if p >= 1: return lambda_plus
+        return np.nan
 
 def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     """
@@ -338,32 +373,43 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     evals = evals[evals > 1e-14]
     evals_sorted = np.sort(evals)[::-1]
 
-    p_tilde = min(p, n)
+    min_pn = min(p, n)
+    max_pn = max(p, n)
 
-    if len(evals_sorted) != p_tilde:
-        # 数値的にゼロ固有値を除いた数がずれる場合に合わせる
-        p_tilde = len(evals_sorted)
+    gamma = min_pn / max_pn
 
-    gamma = p / n
-
-    # 論文の index は 1 <= k <= p_tilde
-    k_start = int(np.ceil(alpha * p_tilde))
-    k_end = int(np.floor((1 - alpha) * p_tilde))
-
-    # 1始まり index
+    # --- Rコード1行目 ---
+    # k = floor(min(p,n)*alpha):floor(min(p,n)*(1-alpha))
+    k_start = int(np.floor(min_pn * alpha))
+    k_end = int(np.floor(min_pn * (1 - alpha)))
+    
+    # Pythonの配列は 0-index なので、Rの 1-index の直訳ではなく要素数を計算
+    # スライス用に k_indices を作成
     k_indices = np.arange(k_start, k_end + 1)
 
-    # Python の配列 index は 0始まりなので -1
-    evals_bulk = evals_sorted[k_indices - 1]
+    predictor = np.zeros(len(k_indices))
+    for i, idx in enumerate(k_indices):
+        # 確率 p を計算
+        prob = (idx + 1) / min_pn # Rの1-indexの感覚に合わせるため +1
+        
+        # 逆CDFを計算 (分散1の標準MP分布での理論固有値)
+        q_val = qmp_python(prob, var=1.0, gamma=gamma)
+        
+        # Rコード末尾のスケール調整
+        predictor[i] = q_val * (max_pn / n)
 
-    q_bulk = mp_upper_quantiles(
-        gamma=gamma,
-        p_tilde=p_tilde,
-        k_indices=k_indices
-    )
-
-    sigma2_hat = np.sum(q_bulk * evals_bulk) / np.sum(q_bulk ** 2)
-
+    # --- Rコード3行目 ---
+    # sigma2hat = lm(rev(l[k]) ~ predictor - 1)$coef[[1]]
+    # Python では l のインデックスを抽出して反転
+    l_k = l[k_indices]
+    l_k_rev = l_k[::-1] # rev() に相当
+    
+    # 切片なしの単回帰分析 (最小二乗法): y = a * x => a = sum(x*y) / sum(x^2)
+    # y が l_k_rev、x が predictor
+    x = predictor
+    y = l_k_rev
+    
+    sigma2_hat = np.sum(x * y) / np.sum(x ** 2)
     t_tw = tw1_quantile(beta=beta)
 
     threshold = sigma2_hat * (
@@ -381,10 +427,7 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
         "sigma2_hat": sigma2_hat,
         "threshold": threshold,
         "gamma": gamma,
-        "p_tilde": p_tilde,
         "k_indices": k_indices,
-        "q_bulk": q_bulk,
-        "evals_bulk": evals_bulk,
         "evals_sorted": evals_sorted,
         "tw_quantile": t_tw,
     }
@@ -409,17 +452,17 @@ def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
     p, n = Y.shape
 
     if p <= n:
-        S = Y @ Y.T
+        S = Y @ Y.T / n
         evals = np.linalg.eigvalsh(S)
     else:
         # 非ゼロ固有値だけなら Y^T Y / n の固有値を使えばよい
-        S_small = Y.T @ Y
+        S_small = Y.T @ Y / n
         evals = np.linalg.eigvalsh(S_small)
 
     sv = np.sqrt(evals)
 
     return bema_algorithm1_from_eigenvalues(
-        evals=sv, #特異値を渡す
+        evals=evals,
         p=p,
         n=n,
         alpha=alpha,
