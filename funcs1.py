@@ -367,39 +367,52 @@ def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
 
 def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     """
-    R の SQM(alpha) に対応する BEMA 実装。
+    BEMA Algorithm 1.
 
-    evals は sample covariance matrix の非ゼロ固有値:
-        S = Y Y^T / n または Y^T Y / n
+    evals は sample covariance matrix の固有値:
+        S = Y Y^T / n
+    または非ゼロ固有値として
+        S_small = Y^T Y / n
     の固有値を渡す。
+
+    注意:
+        元行列 W の特異値 s_i を使う場合は
+            evals = s_i**2 / n
+        とする。
     """
     evals = np.asarray(evals, dtype=float)
     evals = evals[np.isfinite(evals)]
-    evals = evals[evals > 1e-14]
+
+    # 数値誤差による微小負固有値を 0 に丸める
+    evals = np.maximum(evals, 0.0)
+
+    # 降順
     evals_sorted = np.sort(evals)[::-1]
 
     min_pn = min(p, n)
     max_pn = max(p, n)
     gamma = min_pn / max_pn
 
-    if len(evals_sorted) < min_pn:
-        raise ValueError(
-            f"Need at least min(p,n)={min_pn} nonzero covariance eigenvalues, "
-            f"but got {len(evals_sorted)}."
-        )
-
     # R:
     # k = floor(min(p,n)*alpha):floor(min(p,n)*(1-alpha))
-    # R の k は 1-index
     k_start = int(np.floor(min_pn * alpha))
     k_end = int(np.floor(min_pn * (1.0 - alpha)))
 
-    # R の index 0 は「除外」なので、Python側では最低 1 にする
+    # R の index は 1 始まり
     k_start = max(1, k_start)
     k_end = min(min_pn, k_end)
 
     if k_start > k_end:
         raise ValueError("Invalid alpha: selected bulk index set is empty.")
+
+    # 重要:
+    # 非ゼロ固有値数が min_pn より少なくても、
+    # k_end まで存在すれば BEMA 回帰は実行可能
+    if len(evals_sorted) < k_end:
+        raise ValueError(
+            f"Need at least k_end={k_end} eigenvalues for BEMA regression, "
+            f"but got {len(evals_sorted)}."
+        )
 
     k_r = np.arange(k_start, k_end + 1)  # R-style 1-index
 
@@ -420,13 +433,12 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
 
     denom = np.dot(x, x)
     if denom <= 0 or not np.isfinite(denom):
-        raise FloatingPointError("Invalid predictor: denominator is zero or non-finite.")
+        raise FloatingPointError(
+            "Invalid predictor: denominator is zero or non-finite."
+        )
 
     sigma2_hat = np.dot(x, y) / denom
 
-    # R:
-    # qtw(0.9)
-    # 既存の tw1_quantile(beta=0.1) が 0.9 分位点を返す設計ならこれでよい
     t_tw = tw1_quantile(beta=beta)
 
     # R:
@@ -457,6 +469,7 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
         "predictor": predictor,
     }
 
+
 def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
     """
     Y は p x n として扱う。
@@ -484,6 +497,7 @@ def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
         alpha=alpha,
         beta=beta,
     )
+
 def gaussian_broadening_fit(evals, gamma_ratio, a=10):
     """
     論文のセクション2.3に基づく Gaussian Broadening と最小二乗法による sigma^2 の推定
