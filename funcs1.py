@@ -308,117 +308,141 @@ def mp_upper_quantiles(gamma, p_tilde, k_indices, grid_size=200000):
     q = inv_cdf(cdf_targets)
     return q
 
-def qmp_python(p, var, gamma):
+import numpy as np
+from scipy import integrate
+
+
+def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
     """
-    R の qmp 関数 (Marchenko-Pastur の分位関数・逆CDF) の Python 実装
-    p: 求めたいパーセンタイル (0 から 1 の間の確率)
-    var: 分散 (ここでは標準化された 1.0 を想定)
-    gamma: アスペクト比 (m/n または p/n)
+    RMTstat::qmp(probs, ndf=ndf, pdim=pdim, var=var) 相当。
+    lower.tail=TRUE の下側分位点を返す。
+
+    ndf >= pdim を想定。
+    gamma = pdim / ndf <= 1.
+    gamma=1 の下端特異性を避けるため、theta 変換でCDFを作る。
     """
-    lambda_minus = var * (1 - np.sqrt(gamma))**2
-    lambda_plus = var * (1 + np.sqrt(gamma))**2
+    probs = np.asarray(probs, dtype=float)
 
-    # MP分布の確率密度関数 (PDF)
-    def mp_pdf(x):
-        if x < lambda_minus or x > lambda_plus:
-            return 0.0
-        return np.sqrt((lambda_plus - x) * (x - lambda_minus)) / (2 * np.pi * gamma * var * x)
+    if ndf < pdim:
+        raise ValueError("qmp_stable assumes ndf >= pdim. Use ndf=max(p,n), pdim=min(p,n).")
 
-    # 累積分布関数 (CDF) を数値積分で定義
-    def mp_cdf(x):
-        res, _ = integrate.quad(mp_pdf, lambda_minus, x, limit=100)
-        return res
+    gamma = pdim / ndf
 
-    # 求めたい分位数における方程式 CDF(x) - p = 0 を解く
-    def obj_func(x):
-        return mp_cdf(x) - p
+    a = var * (1.0 - np.sqrt(gamma)) ** 2
+    b = var * (1.0 + np.sqrt(gamma)) ** 2
 
-    # root_scalar を用いて解を探索
-    try:
-        res = root_scalar(obj_func, bracket=[lambda_minus, lambda_plus], method='brentq')
-        return res.root
-    except ValueError:
-        # 計算誤差で解が見つからない場合の安全策
-        if p <= 0: return lambda_minus
-        if p >= 1: return lambda_plus
-        return np.nan
+    # x = a + (b-a)(1-cos(theta))/2
+    # gamma=1 の x=0 特異性を避ける
+    eps = 1e-6
+    theta = np.linspace(eps, np.pi - eps, grid_size)
+
+    x = a + (b - a) * (1.0 - np.cos(theta)) / 2.0
+    dx_dtheta = (b - a) * np.sin(theta) / 2.0
+
+    denom = np.maximum(x, np.finfo(float).tiny)
+
+    pdf = np.sqrt(np.maximum((b - x) * (x - a), 0.0)) / (
+        2.0 * np.pi * gamma * var * denom
+    )
+
+    integrand = pdf * dx_dtheta
+
+    cdf = integrate.cumulative_trapezoid(integrand, theta, initial=0.0)
+    cdf = cdf / cdf[-1]
+
+    # 正確な端点を追加
+    cdf_all = np.r_[0.0, cdf, 1.0]
+    x_all = np.r_[a, x, b]
+
+    mask = np.isfinite(cdf_all) & np.isfinite(x_all)
+    cdf_all = cdf_all[mask]
+    x_all = x_all[mask]
+
+    # np.interp 用に重複CDFを除く
+    cdf_unique, idx = np.unique(cdf_all, return_index=True)
+    x_unique = x_all[idx]
+
+    probs = np.clip(probs, 0.0, 1.0)
+    return np.interp(probs, cdf_unique, x_unique)
 
 def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     """
-    BEMA Algorithm 1 for the standard spiked covariance model.
+    R の SQM(alpha) に対応する BEMA 実装。
 
-    Parameters
-    ----------
-    evals : array-like
-        sample covariance matrix の非ゼロ固有値。
-        降順でなくてもよい。
-        -> 訂正：もとの行列の特異値
-    p : int
-        次元。Y が p x n のデータ行列なら p = Y.shape[0]。
-    n : int
-        サンプルサイズ。Y が p x n のデータ行列なら n = Y.shape[1]。
-    alpha : float
-        bulk eigenvalues の中央部分を選ぶパラメータ。
-        論文のデフォルトは 0.2。
-    beta : float
-        over-estimation probability を制御するパラメータ。
-        論文の実用デフォルトは 0.1。
-
-    Returns
-    -------
-    result : dict
-        sigma2_hat, K_hat, threshold, q_bulk, evals_sorted など。
+    evals は sample covariance matrix の非ゼロ固有値:
+        S = Y Y^T / n または Y^T Y / n
+    の固有値を渡す。
     """
     evals = np.asarray(evals, dtype=float)
+    evals = evals[np.isfinite(evals)]
     evals = evals[evals > 1e-14]
     evals_sorted = np.sort(evals)[::-1]
 
     min_pn = min(p, n)
     max_pn = max(p, n)
-
     gamma = min_pn / max_pn
 
-    # --- Rコード1行目 ---
+    if len(evals_sorted) < min_pn:
+        raise ValueError(
+            f"Need at least min(p,n)={min_pn} nonzero covariance eigenvalues, "
+            f"but got {len(evals_sorted)}."
+        )
+
+    # R:
     # k = floor(min(p,n)*alpha):floor(min(p,n)*(1-alpha))
+    # R の k は 1-index
     k_start = int(np.floor(min_pn * alpha))
-    k_end = int(np.floor(min_pn * (1 - alpha)))
-    
-    # Pythonの配列は 0-index なので、Rの 1-index の直訳ではなく要素数を計算
-    # スライス用に k_indices を作成
-    k_indices = np.arange(k_start, k_end + 1)
+    k_end = int(np.floor(min_pn * (1.0 - alpha)))
 
-    predictor = np.zeros(len(k_indices))
-    for i, idx in enumerate(k_indices):
-        # 確率 p を計算
-        prob = (idx + 1) / min_pn # Rの1-indexの感覚に合わせるため +1
-        
-        # 逆CDFを計算 (分散1の標準MP分布での理論固有値)
-        q_val = qmp_python(prob, var=1.0, gamma=gamma)
-        
-        # Rコード末尾のスケール調整
-        predictor[i] = q_val * (max_pn / n)
+    # R の index 0 は「除外」なので、Python側では最低 1 にする
+    k_start = max(1, k_start)
+    k_end = min(min_pn, k_end)
 
-    # --- Rコード3行目 ---
+    if k_start > k_end:
+        raise ValueError("Invalid alpha: selected bulk index set is empty.")
+
+    k_r = np.arange(k_start, k_end + 1)  # R-style 1-index
+
+    # R:
+    # predictor = qmp(k/min(p,n), max(n,p), min(n,p)) * max(p,n)/n
+    predictor = qmp_stable(
+        probs=k_r / min_pn,
+        ndf=max_pn,
+        pdim=min_pn,
+        var=1.0,
+    ) * (max_pn / n)
+
+    # R:
     # sigma2hat = lm(rev(l[k]) ~ predictor - 1)$coef[[1]]
-    # Python では l のインデックスを抽出して反転
-    l_k = evals_sorted[k_indices]
-    l_k_rev = l_k[::-1] # rev() に相当
-    
-    # 切片なしの単回帰分析 (最小二乗法): y = a * x => a = sum(x*y) / sum(x^2)
-    # y が l_k_rev、x が predictor
+    l_k = evals_sorted[k_r - 1]
+    y = l_k[::-1]
     x = predictor
-    y = l_k_rev
-    
-    sigma2_hat = np.sum(x * y) / np.sum(x ** 2)
+
+    denom = np.dot(x, x)
+    if denom <= 0 or not np.isfinite(denom):
+        raise FloatingPointError("Invalid predictor: denominator is zero or non-finite.")
+
+    sigma2_hat = np.dot(x, y) / denom
+
+    # R:
+    # qtw(0.9)
+    # 既存の tw1_quantile(beta=0.1) が 0.9 分位点を返す設計ならこれでよい
     t_tw = tw1_quantile(beta=beta)
 
+    # R:
+    # cutoff = sigma2hat * (
+    #   (1+sqrt(gamma))^2
+    #   + qtw(0.9) * max(p,n)^(-2/3)
+    #     * gamma^(-1/6)
+    #     * (1+sqrt(gamma))^(4/3)
+    # ) * max(p,n)/n
     threshold = sigma2_hat * (
-        (1 + np.sqrt(gamma)) ** 2
+        (1.0 + np.sqrt(gamma)) ** 2
         + t_tw
-        * n ** (-2 / 3)
-        * gamma ** (-1 / 6)
-        * (1 + np.sqrt(gamma)) ** (4 / 3)
-    )
+        * max_pn ** (-2.0 / 3.0)
+        * gamma ** (-1.0 / 6.0)
+        * (1.0 + np.sqrt(gamma)) ** (4.0 / 3.0)
+    ) * (max_pn / n)
 
     s_hat = int(np.sum(evals_sorted > threshold))
 
@@ -427,21 +451,15 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
         "sigma2_hat": sigma2_hat,
         "threshold": threshold,
         "gamma": gamma,
-        "k_indices": k_indices,
+        "k_indices_R_style": k_r,
         "evals_sorted": evals_sorted,
         "tw_quantile": t_tw,
+        "predictor": predictor,
     }
-
 
 def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
     """
-    データ行列 Y から Algorithm 1 を実行する。
-
-    Y は p x n、つまり
-        p = 変数数
-        n = サンプル数
-    として扱う。
-
+    Y は p x n として扱う。
     sample covariance は S = Y Y^T / n。
     """
     Y = np.asarray(Y, dtype=float)
@@ -455,20 +473,17 @@ def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
         S = Y @ Y.T / n
         evals = np.linalg.eigvalsh(S)
     else:
-        # 非ゼロ固有値だけなら Y^T Y / n の固有値を使えばよい
+        # 非ゼロ固有値だけ使う
         S_small = Y.T @ Y / n
         evals = np.linalg.eigvalsh(S_small)
-
-    sv = np.sqrt(evals)
 
     return bema_algorithm1_from_eigenvalues(
         evals=evals,
         p=p,
         n=n,
         alpha=alpha,
-        beta=beta
+        beta=beta,
     )
-
 def gaussian_broadening_fit(evals, gamma_ratio, a=10):
     """
     論文のセクション2.3に基づく Gaussian Broadening と最小二乗法による sigma^2 の推定
