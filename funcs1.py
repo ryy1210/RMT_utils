@@ -401,7 +401,7 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     # --- Rコード3行目 ---
     # sigma2hat = lm(rev(l[k]) ~ predictor - 1)$coef[[1]]
     # Python では l のインデックスを抽出して反転
-    l_k = l[k_indices]
+    l_k = evals_sorted[k_indices]
     l_k_rev = l_k[::-1] # rev() に相当
     
     # 切片なしの単回帰分析 (最小二乗法): y = a * x => a = sum(x*y) / sum(x^2)
