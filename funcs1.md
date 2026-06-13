@@ -32,7 +32,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
         's_hat_postDE':[],
         'threshold_postDE':[],
         'KS_postDE':[],
-        'KS_postDE_1':[]
+
     }
     
     # 補助関数
@@ -42,234 +42,139 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
     def matrix_entropy(eigs):
         p = eigs / torch.sum(eigs)
         return -torch.sum(p * torch.log(p + 1e-12))
-    
-    # 【高速化】MP分布の累積分布関数（CDF）を計算する内部関数
-    def calc_mp_cdf_fast(evals_sorted, gamma, sigma2):
-        lambda_minus = sigma2 * (1 - math.sqrt(gamma))**2
-        lambda_plus = sigma2 * (1 + math.sqrt(gamma))**2
-        
-        tcdf = np.zeros_like(evals_sorted, dtype=float)
-        current_cdf = 0.0
-        last_x = lambda_minus
-        
-        for i, x in enumerate(evals_sorted):
-            if x <= lambda_minus:
-                tcdf[i] = 0.0
-            elif x >= lambda_plus:
-                tcdf[i] = 1.0
-            else:
-                # LLaMAのような巨大行列でも積分計算が重くならないよう、
-                # 前の固有値から現在の固有値までの区間だけを積分して加算します
-                val, _ = integrate.quad(mp_pdf_zero_excluded, last_x, x, args=(gamma, sigma2), limit=50)
-                current_cdf += val
-                tcdf[i] = current_cdf
-                last_x = x
-                
-        return np.clip(tcdf, 0.0, 1.0) # 積分誤差による1.0超過を防ぐ
-
-    # KSダイバージェンス距離を計算する内部関数
-    def calc_ks_distance(evals_sorted, gamma, sigma2):
-        # 経験的CDF (1/p, 2/p, ..., p/p)
-        ecdf = np.arange(1, len(evals_sorted) + 1) / len(evals_sorted)
-        # 理論的CDF
-        tcdf = calc_mp_cdf_fast(evals_sorted, gamma, sigma2)
-        # KS距離 (経験CDFと理論CDFの最大絶対誤差)
-        return np.max(np.abs(ecdf - tcdf))
 
     device = next(model.parameters()).device
 
-    model.eval()
-    with torch.no_grad(): # VRAM節約のため必ず勾配計算をオフにする
-        # レイヤーのループ
-        for name, m in model.named_modules():
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
-                print(f"Analyzing layer: {name}")
-                # 重みの取得とデバイス合わせ
-                matrix = m.weight.data.clone().to(device).to(torch.float)
-                
-                if isinstance(m, nn.Conv2d):
-                    matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
-                    # Conv2dの形状調整 (PyTorchのconv重みは (out, in, k, k))
-                    matrix = matrix.transpose(1, 2).transpose(0, 1)
-                
-                # SVD計算
-                # 固有値 λ = σ^2
-                eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
-                eigs, _ = torch.sort(eigs, descending=False)
-                
-                spectral_norm = eigs[-1].item()
-                fnorm = torch.sum(eigs).item()
-                stable_rank = fnorm / (spectral_norm + 1e-8)
-                entropy = matrix_entropy(torch.sqrt(eigs))
-                
-                # Zero filtering
-                if filter_zeros:
-                    nz_eigs = eigs[eigs > 1e-8] # EVALS_THRESH の代用
-                    N = len(nz_eigs)
-                    if N == 0:
-                        nz_eigs = eigs
-                        N = len(nz_eigs)
-                else:
+    # レイヤーのループ
+    for name, m in model.named_modules():
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            # 重みの取得とデバイス合わせ
+            matrix = m.weight.data.clone().to(device).to(torch.float)
+            
+            if isinstance(m, nn.Conv2d):
+                matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
+                # Conv2dの形状調整 (PyTorchのconv重みは (out, in, k, k))
+                matrix = matrix.transpose(1, 2).transpose(0, 1)
+            
+            # SVD計算
+            # 固有値 λ = σ^2
+            eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
+            eigs, _ = torch.sort(eigs, descending=False)
+            
+            spectral_norm = eigs[-1].item()
+            fnorm = torch.sum(eigs).item()
+            stable_rank = fnorm / (spectral_norm + 1e-8)
+            entropy = matrix_entropy(torch.sqrt(eigs))
+            
+            # Zero filtering
+            if filter_zeros:
+                nz_eigs = eigs[eigs > 1e-8] # EVALS_THRESH の代用
+                N = len(nz_eigs)
+                if N == 0:
                     nz_eigs = eigs
                     N = len(nz_eigs)
-                    
-                log_nz_eigs = torch.log(nz_eigs)
+            else:
+                nz_eigs = eigs
+                N = len(nz_eigs)
                 
-                # Power Law fitting (alpha)
-                if pl_fitting == 'median':
-                    i = int(len(nz_eigs) / 2) # 元コード xmin_pos=2 を想定
-                    xmin = nz_eigs[i]
-                    n = float(N - i)
-                    seq = torch.arange(n, device=device)
-                    final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
+            log_nz_eigs = torch.log(nz_eigs)
+            
+            # Power Law fitting (alpha)
+            if pl_fitting == 'median':
+                i = int(len(nz_eigs) / 2) # 元コード xmin_pos=2 を想定
+                xmin = nz_eigs[i]
+                n = float(N - i)
+                seq = torch.arange(n, device=device)
+                final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
 
-                elif pl_fitting == 'fix-finger':
-                    # --- Fix-finger 法 ---
-                    # ESD(経験的スペクトル密度)のピークを視覚的・経験的に特定し、そこを xmin とする手法
-                    # PyTorchのヒストグラム計算を利用してピークのビンを特定します
-                    hist, bin_edges = torch.histogram(nz_eigs, bins=100)
-                    peak_bin_idx = torch.argmax(hist)
-                    
-                    # ピークとなるビンの左端を閾値 xmin とみなす
-                    xmin_val = bin_edges[peak_bin_idx]
-                    
-                    # nz_eigsは昇順なので、xmin_val以上の最初のインデックス i を取得
-                    i = torch.searchsorted(nz_eigs, xmin_val).item()
-                    
-                    # 全てがノイズとして切り捨てられないよう、最低限の要素数を確保する安全弁
-                    if i >= N - 2:
-                        i = N - 3
-                    
-                    xmin = nz_eigs[i]
-                    n = float(N - i)
-                    final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
+            elif pl_fitting == 'fix-finger':
+                # --- Fix-finger 法 ---
+                # ESD(経験的スペクトル密度)のピークを視覚的・経験的に特定し、そこを xmin とする手法
+                # PyTorchのヒストグラム計算を利用してピークのビンを特定します
+                hist, bin_edges = torch.histogram(nz_eigs, bins=100)
+                peak_bin_idx = torch.argmax(hist)
+                
+                # ピークとなるビンの左端を閾値 xmin とみなす
+                xmin_val = bin_edges[peak_bin_idx]
+                
+                # nz_eigsは昇順なので、xmin_val以上の最初のインデックス i を取得
+                i = torch.searchsorted(nz_eigs, xmin_val).item()
+                
+                # 全てがノイズとして切り捨てられないよう、最低限の要素数を確保する安全弁
+                if i >= N - 2:
+                    i = N - 3
+                
+                xmin = nz_eigs[i]
+                n = float(N - i)
+                final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
 
-                elif pl_fitting == 'goodness-of-fit':
-                    # --- Goodness-of-fit (KS距離最小化) 法 ---
-                    # Clausetら(2009)の厳密な手法。すべての xmin 候補に対してモデルと実際のデータの
-                    # コルモゴロフ・スミルノフ(KS)距離を計算し、距離が最小となる xmin を採用します
+            elif pl_fitting == 'goodness-of-fit':
+                # --- Goodness-of-fit (KS距離最小化) 法 ---
+                # Clausetら(2009)の厳密な手法。すべての xmin 候補に対してモデルと実際のデータの
+                # コルモゴロフ・スミルノフ(KS)距離を計算し、距離が最小となる xmin を採用します
+                
+                best_ks = float('inf')
+                best_i = int(N / 2)
+                
+                # 計算効率化のため、対数の累積和を事前に計算してループ内の合計計算を O(1) にする
+                cumsum_log = torch.cumsum(log_nz_eigs, dim=0)
+                total_log_sum = cumsum_log[-1]
+                
+                # 端すぎる値(テールの要素数が少なすぎる/多すぎる)を除外するため、
+                # 実用上は全体の 10% 〜 90% の範囲を探索するのが安定的かつ高速です
+                start_idx = int(N * 0.1)
+                end_idx = int(N * 0.9)
+                
+                for i in range(start_idx, end_idx):
+                    n_i = float(N - i)
+                    xmin_i = nz_eigs[i]
                     
-                    best_ks = float('inf')
-                    best_i = int(N / 2)
-                    
-                    # 計算効率化のため、対数の累積和を事前に計算してループ内の合計計算を O(1) にする
-                    cumsum_log = torch.cumsum(log_nz_eigs, dim=0)
-                    total_log_sum = cumsum_log[-1]
-                    
-                    # 端すぎる値(テールの要素数が少なすぎる/多すぎる)を除外するため、
-                    # 実用上は全体の 10% 〜 90% の範囲を探索するのが安定的かつ高速です
-                    start_idx = int(N * 0.1)
-                    end_idx = int(N * 0.9)
-                    
-                    for i in range(start_idx, end_idx):
-                        n_i = float(N - i)
-                        xmin_i = nz_eigs[i]
-                        
-                        # 分母の log_nz_eigs[i:] の合計を累積和から高速に取得
-                        sum_log = total_log_sum - cumsum_log[i-1]
-                        alpha_i = 1.0 + n_i / (sum_log - n_i * log_nz_eigs[i])
-                        
-                        # KS距離の計算
-                        # 経験的CDF (データが小さい順に並んでいるため 1/n, 2/n ... n/n となる)
-                        empirical_cdf = torch.arange(1, int(n_i) + 1, device=device) / n_i
-                        
-                        # 理論的CDF (パレート分布の累積分布関数: 1 - (x / xmin)^(-alpha + 1) )
-                        exponent = -(alpha_i - 1.0)
-                        theoretical_cdf = 1.0 - torch.pow(nz_eigs[i:] / xmin_i, exponent)
-                        
-                        # KS統計量: CDFの差の絶対値の最大値
-                        ks_dist = torch.max(torch.abs(empirical_cdf - theoretical_cdf)).item()
-                        
-                        # 最もKS距離が小さい(適合度が高い)インデックスを記録
-                        if ks_dist < best_ks:
-                            best_ks = ks_dist
-                            best_i = i
-                    
-                    # 最適なインデックスで最終的な alpha を計算
-                    i = best_i
-                    xmin = nz_eigs[i]
-                    n = float(N - i)
+                    # 分母の log_nz_eigs[i:] の合計を累積和から高速に取得
                     sum_log = total_log_sum - cumsum_log[i-1]
-                    final_alpha = 1.0 + n / (sum_log - n * log_nz_eigs[i])
-
-                else:
-                    final_alpha = torch.tensor(1.0)
+                    alpha_i = 1.0 + n_i / (sum_log - n_i * log_nz_eigs[i])
                     
-                final_alpha_val = final_alpha.item()
+                    # KS距離の計算
+                    # 経験的CDF (データが小さい順に並んでいるため 1/n, 2/n ... n/n となる)
+                    empirical_cdf = torch.arange(1, int(n_i) + 1, device=device) / n_i
+                    
+                    # 理論的CDF (パレート分布の累積分布関数: 1 - (x / xmin)^(-alpha + 1) )
+                    exponent = -(alpha_i - 1.0)
+                    theoretical_cdf = 1.0 - torch.pow(nz_eigs[i:] / xmin_i, exponent)
+                    
+                    # KS統計量: CDFの差の絶対値の最大値
+                    ks_dist = torch.max(torch.abs(empirical_cdf - theoretical_cdf)).item()
+                    
+                    # 最もKS距離が小さい(適合度が高い)インデックスを記録
+                    if ks_dist < best_ks:
+                        best_ks = ks_dist
+                        best_i = i
                 
-                # AlphaHat計算
-                final_alphahat = final_alpha_val * safe_log10(torch.tensor(spectral_norm)).item()
-                final_alphahat = math.log(1.0 + math.exp(final_alphahat))
+                # 最適なインデックスで最終的な alpha を計算
+                i = best_i
+                xmin = nz_eigs[i]
+                n = float(N - i)
+                sum_log = total_log_sum - cumsum_log[i-1]
+                final_alpha = 1.0 + n / (sum_log - n * log_nz_eigs[i])
 
-                # Numpy配列への変換
-                Y = matrix.cpu().numpy()
+            else:
+                final_alpha = torch.tensor(1.0)
                 
-                # RMTの標準形式 (p <= n になるように転置)
-                p, n = Y.shape
-                if p > n:
-                    Y = Y.T
-                    p, n = Y.shape
-                gamma = p / n
-
-                 # ----------------------------------------------------
-                # [Phase 1] preDE (Dyson Equalizer適用前) の解析
-                # ----------------------------------------------------
-                # BEMAによる推定 (辞書型から値を取り出す)
-                bema_res_pre = bema_algorithm1_from_data(Y)
-                sigma2_pre = bema_res_pre["sigma2_hat"]
-                threshold_pre = bema_res_pre["threshold"]
-                s_hat_pre = bema_res_pre["s_hat"]
-                
-                # 相関行列の固有値 (X = Y Y^T / n) を計算し、昇順ソート
-                X_pre = (Y @ Y.T) / n
-                evals_pre = np.sort(np.linalg.eigvalsh(X_pre).real)
-                
-                # KS距離の計算
-                ks_pre = calc_ks_distance(evals_pre, gamma, sigma2_pre)
-
-                # ----------------------------------------------------
-                # [Phase 2] postDE (Dyson Equalizer適用後) の解析
-                # ----------------------------------------------------
-                # DEの適用（Y_hatのみを受け取る）
-                Y_post, _, _ = dyson_equalizer_algorithm1(Y)
-                
-                # BEMAによる推定 (辞書型から値を取り出す)
-                bema_res_post = bema_algorithm1_from_data(Y_post)
-                sigma2_post = bema_res_post["sigma2_hat"]
-                threshold_post = bema_res_post["threshold"]
-                s_hat_post = bema_res_post["s_hat"]
-                
-                # 固有値の計算と昇順ソート
-                X_post = (Y_post @ Y_post.T) / n
-                evals_post = np.sort(np.linalg.eigvalsh(X_post).real)
-                
-                # KS距離の計算 (BEMA推定分散)
-                ks_post = calc_ks_distance(evals_post, gamma, sigma2_post)
-                # KS距離の計算 (分散=1.0固定)
-                ks_post_1 = calc_ks_distance(evals_post, gamma, 1.0)
-
-                
-                # 結果の保存
-                results['name'].append(name)
-                results['spectral_norm'].append(spectral_norm)
-                results['entropy'].append(entropy.detach().cpu().item())
-                results['stable_rank'].append(stable_rank)
-                results['alphahat'].append(final_alphahat)
-                results['alpha_method'].append(pl_fitting)
-                results['alpha'].append(final_alpha_val)
-                results['eigs'].append(eigs.detach().cpu().numpy())
-                results['eigs_num'].append(len(eigs))
-                
-                results['sigma2_preDE'].append(sigma2_pre)
-                results['s_hat_preDE'].append(s_hat_pre)
-                results['threshold_preDE'].append(threshold_pre)
-                results['KS_preDE'].append(ks_pre)
-                
-                results['sigma2_postDE'].append(sigma2_post)
-                results['s_hat_postDE'].append(s_hat_post)
-                results['threshold_postDE'].append(threshold_post)
-                results['KS_postDE'].append(ks_post)
-                results['KS_postDE_1'].append(ks_post_1)
+            final_alpha_val = final_alpha.item()
+            
+            # AlphaHat計算
+            final_alphahat = final_alpha_val * safe_log10(torch.tensor(spectral_norm)).item()
+            final_alphahat = math.log(1.0 + math.exp(final_alphahat))
+            
+            # 結果の保存
+            results['name'].append(name)
+            results['spectral_norm'].append(spectral_norm)
+            results['entropy'].append(entropy.detach().cpu().item())
+            results['stable_rank'].append(stable_rank)
+            results['alphahat'].append(final_alphahat)
+            results['alpha_method'].append(pl_fitting)
+            results['alpha'].append(final_alpha_val)
+            results['eigs'].append(eigs.detach().cpu().numpy())
+            results['eigs_num'].append(len(eigs))
             
     return results
 
