@@ -121,6 +121,10 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
     with torch.no_grad(): # VRAM節約のため必ず勾配計算をオフにする
         # レイヤーのループ
         for name, m in model.named_modules():
+            if "lm_head" in name:
+                print(f"Skipping extremely large layer: {name}")
+                continue
+            
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 print(f"Analyzing layer: {name}")
                 # 重みの取得とデバイス合わせ
