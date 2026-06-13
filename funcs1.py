@@ -13,6 +13,43 @@ from scipy.optimize import minimize, root_scalar
 def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
     """
     モデル内の全線形層（Conv2d, Linear）に対してESD関連のメトリクスを計算する関数
+    Args:
+        model (torch.nn.Module): 解析対象のPyTorchモデル（LLaMAなどのLLMも可）
+        pl_fitting (str): べき指数 alpha を計算・フィッティングする手法 
+                          ('median', 'fix-finger', 'goodness-of-fit' )
+        conv_norm (float): 畳み込み層の次元変換時に適用する正規化係数
+        filter_zeros (bool): ゼロや極小な特異値（ノイズ）を事前計算から除外するかどうか
+        bins (int): ヒストグラム計算や fix-finger で使用するビンの数
+
+    Returns:
+        dict: 以下のキーと対応する各層のメトリクス（リスト）を格納した辞書
+
+        [基本指標 (HT-SR理論のShape / Scale Metrics)]
+        - 'name': 解析対象のモジュール（層）名
+        - 'spectral_norm': スペクトルノルム（最大固有値）。層が持つ最大シグナルの絶対的な強さ。
+        - 'entropy': 行列エントロピー。低いほど一部の特異値に情報が集中している（低ランク性が高い）。
+        - 'stable_rank': 安定ランク。フロベニウスノルム^2 / スペクトルノルム^2。
+        - 'alphahat': アルファハット。alpha と spectral_norm を統合したモデル汎化性能の予測指標。scaleに依存する
+        - 'alpha_method': alpha を計算した際の手法の記録。
+        - 'alpha': べき指数。特異値分布の「裾の重さ」。小さいほど有用な特徴を強く学習している。scale不変
+        - 'eigs': 特異値の2乗（固有値）の配列。
+        - 'eigs_num': 固有値の総数。
+
+        [Phase 1: Dyson Equalizer 適用前 (preDE) のRMT指標]
+        - 'sigma2_preDE': BEMAによって推定された、ノイズ成分の分散。
+        - 's_hat_preDE': 閾値を超えた「純粋なシグナル」とみなされる特異値の数。
+        - 's_hat_ratio_preDE': 全特異値数に対するシグナル数 (s_hat) の割合（情報密度）。
+        - 'threshold_preDE': ノイズとシグナルを分離する境界閾値（Tracy-Widom補正込み）。
+        - 'KS_preDE': 実データの経験的CDFと、理論的なMP分布のCDFとのKS距離。
+
+        [Phase 2: Dyson Equalizer 適用後 (postDE) のRMT指標]
+        - 'sigma2_postDE': DE適用後の重み行列に対する、BEMA推定ノイズ分散。
+        - 's_hat_postDE': DE適用後のシグナル特異値の数。
+        - 's_hat_ratio_postDE': DE適用後のシグナル割合。低ランク近似(LRA)時のランク決定の根拠となる。
+        - 'threshold_postDE': DE適用後のノイズ/シグナル境界閾値。
+        - 'KS_postDE': DE適用後の経験的CDFと、sigma2_postDEを用いた理論的MP分布とのKS距離。
+        - 'KS_postDE_1': DE適用後の経験的CDFと、分散を1.0に固定した理論的MP分布とのKS距離。
+                         (DEによるノイズ分散の均一化が完全に機能したかを確認する指標)
     """
     results = {
         'name': [],
@@ -26,10 +63,12 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
         'eigs_num': [],
         'sigma2_preDE':[],
         's_hat_preDE':[],
+        's_hat_ratio_preDE': [], 
         'threshold_preDE':[],
         'KS_preDE':[],
         'sigma2_postDE':[],
         's_hat_postDE':[],
+        's_hat_ratio_postDE': [], 
         'threshold_postDE':[],
         'KS_postDE':[],
         'KS_postDE_1':[]
@@ -219,6 +258,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 sigma2_pre = bema_res_pre["sigma2_hat"]
                 threshold_pre = bema_res_pre["threshold"]
                 s_hat_pre = bema_res_pre["s_hat"]
+                s_hat_ratio_pre = s_hat_pre / p
                 
                 # 相関行列の固有値 (X = Y Y^T / n) を計算し、昇順ソート
                 X_pre = (Y @ Y.T) / n
@@ -238,6 +278,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 sigma2_post = bema_res_post["sigma2_hat"]
                 threshold_post = bema_res_post["threshold"]
                 s_hat_post = bema_res_post["s_hat"]
+                s_hat_ratio_post = s_hat_post / p
                 
                 # 固有値の計算と昇順ソート
                 X_post = (Y_post @ Y_post.T) / n
@@ -259,14 +300,16 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 results['alpha'].append(final_alpha_val)
                 results['eigs'].append(eigs.detach().cpu().numpy())
                 results['eigs_num'].append(len(eigs))
-                
+
                 results['sigma2_preDE'].append(sigma2_pre)
                 results['s_hat_preDE'].append(s_hat_pre)
+                results['s_hat_ratio_preDE'].append(s_hat_ratio_pre)
                 results['threshold_preDE'].append(threshold_pre)
                 results['KS_preDE'].append(ks_pre)
                 
                 results['sigma2_postDE'].append(sigma2_post)
                 results['s_hat_postDE'].append(s_hat_post)
+                results['s_hat_ratio_postDE'].append(s_hat_ratio_post)
                 results['threshold_postDE'].append(threshold_post)
                 results['KS_postDE'].append(ks_post)
                 results['KS_postDE_1'].append(ks_post_1)
