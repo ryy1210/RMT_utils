@@ -31,7 +31,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
         - 'spectral_norm': スペクトルノルム（最大固有値）．層が持つ最大シグナルの絶対的な強さ．
         - 'entropy': 行列エントロピー．低いほど一部の特異値に情報が集中している（低ランク性が高い）．
         - 'stable_rank': 安定ランク．フロベニウスノルム^2 / スペクトルノルム^2．
-        - 'alphahat': アルファハット．alpha と spectral_norm を統合したモデル汎化性能の予測指標．scaleに依存する
+        - 'weighted_alpha': アルファハット．alpha と spectral_norm を統合したモデル汎化性能の予測指標．scaleに依存する
         - 'alpha_method': alpha を計算した際の手法の記録．
         - 'tail_xmin': alpha計算の際にESDのtailが始まっていると判定した値
         - 'alpha': べき指数．特異値分布の「裾の重さ」．小さいほど有用な特徴を強く学習している．scale不変
@@ -60,7 +60,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
         'spectral_norm': [],
         'entropy': [],
         'stable_rank': [],
-        'alphahat': [],
+        'weighted_alpha': [],
         'alpha_method':[],
         'alpha': [],
         'tail_xmin':[],
@@ -247,9 +247,9 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                     
                 final_alpha_val = final_alpha.item()
                 
-                # AlphaHat計算
-                final_alphahat = final_alpha_val * safe_log10(torch.tensor(spectral_norm)).item()
-                final_alphahat = math.log(1.0 + math.exp(final_alphahat))
+                # weighted_alpha計算
+                final_weighted_alpha = final_alpha_val * safe_log10(torch.tensor(spectral_norm)).item()
+                final_weighted_alpha = math.log(1.0 + math.exp(final_weighted_alpha))
 
                 # Numpy配列への変換
                 Y = matrix.cpu().numpy()
@@ -313,7 +313,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 results['spectral_norm'].append(spectral_norm)
                 results['entropy'].append(entropy.detach().cpu().item())
                 results['stable_rank'].append(stable_rank)
-                results['alphahat'].append(final_alphahat)
+                results['weighted_alpha'].append(final_weighted_alpha)
                 results['alpha_method'].append(pl_fitting)
                 results['alpha'].append(final_alpha_val)
                 results['tail_xmin'].append(xmin)
@@ -410,7 +410,7 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
             # この時点で W_np は必ず m <= n の形状になる
             m, n = W_np.shape
 
-            
+
             if DE:
                 # 1. Dyson Equalizer
                 Y_hat, x_hat, y_hat = dyson_equalizer_algorithm1(W_np)
@@ -439,11 +439,21 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
                 x_hat_flat = np.asarray(x_hat).flatten()
                 y_hat_flat = np.asarray(y_hat).flatten()
                 
-                eps = 1e-12
-                # x_hat は長さ m (行)、y_hat は長さ n (列)
-                D_x_sqrt = torch.tensor(1.0 / (x_hat_flat + eps), device=device, dtype=torch.float32)
-                D_y_sqrt = torch.tensor(1.0 / (y_hat_flat + eps), device=device, dtype=torch.float32)
                 
+                eps = 1e-12
+
+                D_x_sqrt = torch.tensor(
+                    np.sqrt(x_hat_flat + eps),
+                    device=device,
+                    dtype=torch.float32
+                )
+
+                D_y_sqrt = torch.tensor(
+                    np.sqrt(y_hat_flat + eps),
+                    device=device,
+                    dtype=torch.float32
+                )
+
                 # ブロードキャスト計算
                 # print("W_tilde.shape:", W_tilde.shape)
                 # print("D_x_sqrt.shape:", D_x_sqrt.shape)
@@ -452,14 +462,15 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
                 
             else:
                 # 通常の SVD         
+                W_tensor = torch.tensor(W_np, device=device, dtype=torch.float32)
                 if fast_SVD:
-                    U_approx, S_approx, V_approx = torch.svd_lowrank(Y_hat_tensor, q=s_hat + 10) # Vの出力の仕方が通常のSVDとは違う
+                    U_approx, S_approx, V_approx = torch.svd_lowrank(W_tensor, q=s_hat + 10) # Vの出力の仕方が通常のSVDとは違う
 
                     U_hat = U_approx[:, :s_hat]
                     S_hat = torch.diag(S_approx[:s_hat])
                     Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
                 else:
-                    U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
+                    U, S, Vh = torch.linalg.svd(W_tensor, full_matrices=False)
 
                     U_hat = U[:, :s_hat]
                     S_hat = torch.diag(S[:s_hat])
@@ -473,6 +484,31 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
                 W_hat = W_hat.T
 
             # 重みの更新
+            # --- safety check before casting ---
+            if not torch.isfinite(W_hat).all():
+                print(f"❌ Non-finite W_hat before cast: {name}")
+                print("nan:", torch.isnan(W_hat).sum().item())
+                print("inf:", torch.isinf(W_hat).sum().item())
+
+                finite = W_hat[torch.isfinite(W_hat)]
+                if finite.numel() > 0:
+                    print("finite min:", finite.min().item())
+                    print("finite max:", finite.max().item())
+                    print("finite max abs:", finite.abs().max().item())
+
+                raise RuntimeError(f"Non-finite W_hat before cast at {name}")
+
+            # --- fp16 overflow check ---
+            if dtype == torch.float16:
+                fp16_max = torch.finfo(torch.float16).max
+                max_abs = W_hat.abs().max().item()
+
+                if max_abs > fp16_max:
+                    print(f"❌ fp16 overflow risk at {name}")
+                    print("max_abs:", max_abs)
+                    print("fp16 max:", fp16_max)
+                    raise RuntimeError(f"fp16 overflow at {name}")
+
             module.weight.data = W_hat.to(dtype)
             
             # 実効パラメータ数の記録
