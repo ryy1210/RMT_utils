@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
+import pandas as pd
 import scipy.stats
 import scipy.optimize as opt
 import scipy.interpolate as interp
 from scipy import integrate
 from scipy.stats import norm
 from scipy.optimize import minimize, root_scalar
+from tqdm.auto import tqdm
 
 
 def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
@@ -332,8 +334,156 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 results['KS_postDE'].append(ks_post)
                 results['KS_postDE_1'].append(ks_post_1)
             
-    return results
+    return pd.DataFrame(results)
 
+
+def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
+    """
+    model: LRAを対象にするモデル
+    results: get_esd_metricsをmodelに適用した結果 pd.DataFrame
+    alpha_threshold: 重み行列のalphaでLRAするかどうかの閾値
+    DE: s_hatとしてpostDEを使う
+    fast_SVD: LRAするために実質s_hat分だけSVDできればよい．GPUだとさらに高速
+    """
+    lra_layer_name = []
+    lra_params = {}
+    
+    res_indexed = results.set_index('name')
+    
+    # 対象となる全 Linear 層をリストアップ (tqdmで回すため)
+    target_modules = [(name, mod) for name, mod in model.named_modules() if isinstance(mod, nn.Linear)]
+    
+    print(f"全 {len(target_modules)} 個の Linear 層をスキャン中...")
+    
+    # tqdm でプログレスバーを表示
+    for name, module in tqdm(target_modules, desc="LRA Progress"):
+            
+        if name not in res_indexed.index:
+            lra_params[name] = module.weight.numel()
+            if module.bias is not None:
+                lra_params[name] += module.bias.numel()
+            continue
+
+        row = res_indexed.loc[name]
+        alpha = row['alpha']
+        
+        s_col = 's_hat_postDE' if DE else 's_hat_preDE'
+        if s_col not in row or pd.isna(row[s_col]):
+            lra_params[name] = module.weight.numel()
+            continue
+            
+        s_hat = int(row[s_col])
+        
+        W_raw = module.weight.data
+        m_orig, n_orig = W_raw.shape
+        full_rank = min(m_orig, n_orig)
+        
+        # 圧縮条件の判定
+        if alpha < alpha_threshold and 0 < s_hat < full_rank:
+            lra_layer_name.append(name)
+            
+            device = W_raw.device
+            dtype = W_raw.dtype
+            
+            W_np = W_raw.detach().cpu().to(torch.float32).numpy()
+
+            # W_npにnanなどが入っているとSVDができない
+            W_np = np.asarray(W_np)
+            W_np = np.nan_to_num(W_np, nan=0.0, posinf=0.0, neginf=0.0)
+            W_np = W_np.astype(np.float64, copy=False)
+            W_np = np.ascontiguousarray(W_np)
+
+            # これでもエラー出る場合用の確認
+            # print("layer:", name)
+            # print("shape:", W_np.shape)
+            # print("dtype:", W_np.dtype)
+            # print("finite:", np.isfinite(W_np).all())
+            # print("min/max:", np.min(W_np), np.max(W_np))
+
+            # --- 💡 縦長行列 (m > n) の自動転置 ---
+            # DE関数は m <= n を要求するため、縦長なら転置して横長にする
+            transposed = False
+            if m_orig > n_orig:
+                W_np = W_np.T
+                transposed = True
+
+            # この時点で W_np は必ず m <= n の形状になる
+            m, n = W_np.shape
+
+            
+            if DE:
+                # 1. Dyson Equalizer
+                Y_hat, x_hat, y_hat = dyson_equalizer_algorithm1(W_np)
+                Y_hat = np.nan_to_num(Y_hat, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # 2. SVD と 低ランク近似
+                Y_hat_tensor = torch.tensor(Y_hat, device=device, dtype=torch.float32)
+
+                if fast_SVD:
+                    U_approx, S_approx, Vh_approx = torch.svd_lowrank(Y_hat_tensor, q=s_hat + 10)
+
+                    U_hat = U_approx[:, :s_hat]
+                    S_hat = torch.diag(S_approx[:s_hat])
+                    Vh_hat = Vh_approx[:s_hat, :]
+                else:
+                    U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
+
+                    
+                    U_hat = U[:, :s_hat]
+                    S_hat = torch.diag(S[:s_hat])
+                    Vh_hat = Vh[:s_hat, :]
+
+                W_tilde = U_hat @ S_hat @ Vh_hat # 形状: (m, n)
+                
+                # 3. Re-coloring (復元）
+                x_hat_flat = np.asarray(x_hat).flatten()
+                y_hat_flat = np.asarray(y_hat).flatten()
+                
+                eps = 1e-12
+                # x_hat は長さ m (行)、y_hat は長さ n (列)
+                D_x_sqrt = torch.tensor(1.0 / (x_hat_flat + eps), device=device, dtype=torch.float32)
+                D_y_sqrt = torch.tensor(1.0 / (y_hat_flat + eps), device=device, dtype=torch.float32)
+                
+                # ブロードキャスト計算
+                # print("W_tilde.shape:", W_tilde.shape)
+                # print("D_x_sqrt.shape:", D_x_sqrt.shape)
+                # print("D_y_sqrt.shape:", D_y_sqrt.shape)
+                W_hat = W_tilde * D_x_sqrt.unsqueeze(1) * D_y_sqrt.unsqueeze(0)
+                
+            else:
+                # 通常の SVD         
+                U, S, Vh = torch.linalg.svd(
+                    W_raw.to(torch.float32),
+                    full_matrices=False
+                )
+
+                U_hat = U[:, :s_hat]
+                S_hat = torch.diag(S[:s_hat])
+                Vh_hat = Vh[:s_hat, :]
+
+                W_hat = U_hat @ S_hat @ Vh_hat
+
+
+            # --- 元の形状に戻す (転置していた場合) ---
+            if transposed:
+                W_hat = W_hat.T
+
+            # 重みの更新
+            module.weight.data = W_hat.to(dtype)
+            
+            # 実効パラメータ数の記録
+            lra_params[name] = s_hat * (m_orig + n_orig + 1)
+            if module.bias is not None:
+                lra_params[name] += module.bias.numel()
+                
+        else:
+            lra_params[name] = module.weight.numel()
+            if module.bias is not None:
+                lra_params[name] += module.bias.numel()
+
+    print(f"\n✅ LRA 完了: 全 {len(res_indexed)} 対象層のうち、{len(lra_layer_name)} 層を圧縮しました。")
+    
+    return model, lra_layer_name, lra_params
 
 
 def dyson_equalizer_algorithm1(Y, full_matrices = True):
