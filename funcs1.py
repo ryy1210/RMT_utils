@@ -420,11 +420,11 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
                 Y_hat_tensor = torch.tensor(Y_hat, device=device, dtype=torch.float32)
 
                 if fast_SVD:
-                    U_approx, S_approx, Vh_approx = torch.svd_lowrank(Y_hat_tensor, q=s_hat + 10)
+                    U_approx, S_approx, V_approx = torch.svd_lowrank(Y_hat_tensor, q=s_hat + 10) # Vの出力の仕方が通常のSVDとは違う
 
                     U_hat = U_approx[:, :s_hat]
                     S_hat = torch.diag(S_approx[:s_hat])
-                    Vh_hat = Vh_approx[:s_hat, :]
+                    Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
                 else:
                     U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
 
@@ -452,14 +452,18 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
                 
             else:
                 # 通常の SVD         
-                U, S, Vh = torch.linalg.svd(
-                    W_raw.to(torch.float32),
-                    full_matrices=False
-                )
+                if fast_SVD:
+                    U_approx, S_approx, V_approx = torch.svd_lowrank(Y_hat_tensor, q=s_hat + 10) # Vの出力の仕方が通常のSVDとは違う
 
-                U_hat = U[:, :s_hat]
-                S_hat = torch.diag(S[:s_hat])
-                Vh_hat = Vh[:s_hat, :]
+                    U_hat = U_approx[:, :s_hat]
+                    S_hat = torch.diag(S_approx[:s_hat])
+                    Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
+                else:
+                    U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
+
+                    U_hat = U[:, :s_hat]
+                    S_hat = torch.diag(S[:s_hat])
+                    Vh_hat = Vh[:s_hat, :]
 
                 W_hat = U_hat @ S_hat @ Vh_hat
 
