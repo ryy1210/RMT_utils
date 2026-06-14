@@ -379,7 +379,7 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
         full_rank = min(m_orig, n_orig)
         
         # 圧縮条件の判定
-        if alpha < alpha_threshold and 0 < s_hat < full_rank:
+        if alpha > alpha_threshold and 0 < s_hat < full_rank:
             lra_layer_name.append(name)
             
             device = W_raw.device
