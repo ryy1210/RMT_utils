@@ -26,29 +26,31 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
 
         [基本指標 (HT-SR理論のShape / Scale Metrics)]
         - 'name': 解析対象のモジュール（層）名
-        - 'spectral_norm': スペクトルノルム（最大固有値）。層が持つ最大シグナルの絶対的な強さ。
-        - 'entropy': 行列エントロピー。低いほど一部の特異値に情報が集中している（低ランク性が高い）。
-        - 'stable_rank': 安定ランク。フロベニウスノルム^2 / スペクトルノルム^2。
-        - 'alphahat': アルファハット。alpha と spectral_norm を統合したモデル汎化性能の予測指標。scaleに依存する
-        - 'alpha_method': alpha を計算した際の手法の記録。
-        - 'alpha': べき指数。特異値分布の「裾の重さ」。小さいほど有用な特徴を強く学習している。scale不変
-        - 'eigs': 特異値の2乗（固有値）の配列。
-        - 'eigs_num': 固有値の総数。
+        - 'spectral_norm': スペクトルノルム（最大固有値）．層が持つ最大シグナルの絶対的な強さ．
+        - 'entropy': 行列エントロピー．低いほど一部の特異値に情報が集中している（低ランク性が高い）．
+        - 'stable_rank': 安定ランク．フロベニウスノルム^2 / スペクトルノルム^2．
+        - 'alphahat': アルファハット．alpha と spectral_norm を統合したモデル汎化性能の予測指標．scaleに依存する
+        - 'alpha_method': alpha を計算した際の手法の記録．
+        - 'tail_xmin': alpha計算の際にESDのtailが始まっていると判定した値
+        - 'alpha': べき指数．特異値分布の「裾の重さ」．小さいほど有用な特徴を強く学習している．scale不変
+        - 'eigs': 特異値の2乗（固有値）の配列．
+        - 'eigs_num': 固有値の総数．
 
         [Phase 1: Dyson Equalizer 適用前 (preDE) のRMT指標]
-        - 'sigma2_preDE': BEMAによって推定された、ノイズ成分の分散。
-        - 's_hat_preDE': 閾値を超えた「純粋なシグナル」とみなされる特異値の数。
-        - 's_hat_ratio_preDE': 全特異値数に対するシグナル数 (s_hat) の割合（情報密度）。
-        - 'threshold_preDE': ノイズとシグナルを分離する境界閾値（Tracy-Widom補正込み）。
-        - 'KS_preDE': 実データの経験的CDFと、理論的なMP分布のCDFとのKS距離。
+        - 'sigma2_preDE': BEMAによって推定された，ノイズ成分の分散．
+        - 's_hat_preDE': 閾値を超えた「純粋なシグナル」とみなされる特異値の数．
+        - 's_hat_ratio_preDE': 全特異値数に対するシグナル数 (s_hat) の割合（情報密度）．
+        - 'threshold_preDE': ノイズとシグナルを分離する境界閾値（Tracy-Widom補正込み）．
+        - 'KS_preDE': 実データの経験的CDFと，理論的なMP分布のCDFとのKS距離．
+        - 'mp_soft_rank_preDE': MP Soft Rank = threshold_preDE / eig_max
 
         [Phase 2: Dyson Equalizer 適用後 (postDE) のRMT指標]
-        - 'sigma2_postDE': DE適用後の重み行列に対する、BEMA推定ノイズ分散。
-        - 's_hat_postDE': DE適用後のシグナル特異値の数。
-        - 's_hat_ratio_postDE': DE適用後のシグナル割合。低ランク近似(LRA)時のランク決定の根拠となる。
-        - 'threshold_postDE': DE適用後のノイズ/シグナル境界閾値。
-        - 'KS_postDE': DE適用後の経験的CDFと、sigma2_postDEを用いた理論的MP分布とのKS距離。
-        - 'KS_postDE_1': DE適用後の経験的CDFと、分散を1.0に固定した理論的MP分布とのKS距離。
+        - 'sigma2_postDE': DE適用後の重み行列に対する，BEMA推定ノイズ分散．
+        - 's_hat_postDE': DE適用後のシグナル特異値の数．
+        - 's_hat_ratio_postDE': DE適用後のシグナル割合．低ランク近似(LRA)時のランク決定の根拠となる．
+        - 'threshold_postDE': DE適用後のノイズ/シグナル境界閾値．
+        - 'KS_postDE': DE適用後の経験的CDFと，sigma2_postDEを用いた理論的MP分布とのKS距離．
+        - 'KS_postDE_1': DE適用後の経験的CDFと，分散を1.0に固定した理論的MP分布とのKS距離．
                          (DEによるノイズ分散の均一化が完全に機能したかを確認する指標)
     """
     results = {
@@ -59,6 +61,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
         'alphahat': [],
         'alpha_method':[],
         'alpha': [],
+        'tail_xmin':[],
         'eigs': [],
         'eigs_num': [],
         'sigma2_preDE':[],
@@ -66,6 +69,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
         's_hat_ratio_preDE': [], 
         'threshold_preDE':[],
         'KS_preDE':[],
+        'mp_soft_rank_preDE': [],
         'sigma2_postDE':[],
         's_hat_postDE':[],
         's_hat_ratio_postDE': [], 
@@ -97,7 +101,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
             elif x >= lambda_plus:
                 tcdf[i] = 1.0
             else:
-                # LLaMAのような巨大行列でも積分計算が重くならないよう、
+                # LLaMAのような巨大行列でも積分計算が重くならないよう，
                 # 前の固有値から現在の固有値までの区間だけを積分して加算します
                 val, _ = integrate.quad(mp_pdf_zero_excluded, last_x, x, args=(gamma, sigma2), limit=50)
                 current_cdf += val
@@ -124,7 +128,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
             if "lm_head" in name:
                 print(f"Skipping extremely large layer: {name}")
                 continue
-            
+
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 print(f"Analyzing layer: {name}")
                 # 重みの取得とデバイス合わせ
@@ -168,7 +172,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
 
                 elif pl_fitting == 'fix-finger':
                     # --- Fix-finger 法 ---
-                    # ESD(経験的スペクトル密度)のピークを視覚的・経験的に特定し、そこを xmin とする手法
+                    # ESD(経験的スペクトル密度)のピークを視覚的・経験的に特定し，そこを xmin とする手法
                     # PyTorchのヒストグラム計算を利用してピークのビンを特定します
                     hist, bin_edges = torch.histogram(nz_eigs, bins=100)
                     peak_bin_idx = torch.argmax(hist)
@@ -176,10 +180,10 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                     # ピークとなるビンの左端を閾値 xmin とみなす
                     xmin_val = bin_edges[peak_bin_idx]
                     
-                    # nz_eigsは昇順なので、xmin_val以上の最初のインデックス i を取得
+                    # nz_eigsは昇順なので，xmin_val以上の最初のインデックス i を取得
                     i = torch.searchsorted(nz_eigs, xmin_val).item()
                     
-                    # 全てがノイズとして切り捨てられないよう、最低限の要素数を確保する安全弁
+                    # 全てがノイズとして切り捨てられないよう，最低限の要素数を確保する安全弁
                     if i >= N - 2:
                         i = N - 3
                     
@@ -189,17 +193,17 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
 
                 elif pl_fitting == 'goodness-of-fit':
                     # --- Goodness-of-fit (KS距離最小化) 法 ---
-                    # Clausetら(2009)の厳密な手法。すべての xmin 候補に対してモデルと実際のデータの
-                    # コルモゴロフ・スミルノフ(KS)距離を計算し、距離が最小となる xmin を採用します
+                    # Clausetら(2009)の厳密な手法．すべての xmin 候補に対してモデルと実際のデータの
+                    # コルモゴロフ・スミルノフ(KS)距離を計算し，距離が最小となる xmin を採用します
                     
                     best_ks = float('inf')
                     best_i = int(N / 2)
                     
-                    # 計算効率化のため、対数の累積和を事前に計算してループ内の合計計算を O(1) にする
+                    # 計算効率化のため，対数の累積和を事前に計算してループ内の合計計算を O(1) にする
                     cumsum_log = torch.cumsum(log_nz_eigs, dim=0)
                     total_log_sum = cumsum_log[-1]
                     
-                    # 端すぎる値(テールの要素数が少なすぎる/多すぎる)を除外するため、
+                    # 端すぎる値(テールの要素数が少なすぎる/多すぎる)を除外するため，
                     # 実用上は全体の 10% 〜 90% の範囲を探索するのが安定的かつ高速です
                     start_idx = int(N * 0.1)
                     end_idx = int(N * 0.9)
@@ -236,6 +240,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                     final_alpha = 1.0 + n / (sum_log - n * log_nz_eigs[i])
 
                 else:
+                    print("method for alpha is not selected.")
                     final_alpha = torch.tensor(1.0)
                     
                 final_alpha_val = final_alpha.item()
@@ -264,12 +269,19 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 s_hat_pre = bema_res_pre["s_hat"]
                 s_hat_ratio_pre = s_hat_pre / p
                 
-                # 相関行列の固有値 (X = Y Y^T / n) を計算し、昇順ソート
+                # 相関行列の固有値 (X = Y Y^T / n) を計算し，昇順ソート
                 X_pre = (Y @ Y.T) / n
                 evals_pre = np.sort(np.linalg.eigvalsh(X_pre).real)
                 
                 # KS距離の計算
                 ks_pre = calc_ks_distance(evals_pre, gamma, sigma2_pre)
+
+                max_eig_pre = np.max(evals_pre) if len(evals_pre) > 0 else 0.0
+
+                if max_eig_pre > 0:
+                    mp_soft_rank_pre = threshold_pre / max_eig_pre
+                else:
+                    mp_soft_rank_pre = np.nan
 
                 # ----------------------------------------------------
                 # [Phase 2] postDE (Dyson Equalizer適用後) の解析
@@ -302,6 +314,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 results['alphahat'].append(final_alphahat)
                 results['alpha_method'].append(pl_fitting)
                 results['alpha'].append(final_alpha_val)
+                results['tail_xmin'].append(xmin)
                 results['eigs'].append(eigs.detach().cpu().numpy())
                 results['eigs_num'].append(len(eigs))
 
@@ -310,6 +323,7 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
                 results['s_hat_ratio_preDE'].append(s_hat_ratio_pre)
                 results['threshold_preDE'].append(threshold_pre)
                 results['KS_preDE'].append(ks_pre)
+                results['mp_soft_rank_preDE'].append(mp_soft_rank_pre)
                 
                 results['sigma2_postDE'].append(sigma2_post)
                 results['s_hat_postDE'].append(s_hat_post)
@@ -322,13 +336,14 @@ def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True
 
 
 
-def dyson_equalizer_algorithm1(Y):
+def dyson_equalizer_algorithm1(Y, full_matrices = True):
     """
     Landa & Kluger (2024) - Algorithm 1: The Dyson Equalizer
-    論文の数式と記法に完全に対応させた実装。
+    論文の数式と記法に完全に対応させた実装．
 
     Input:
         Y: Data matrix (m x n), m <= n
+        full_matrices(bool): SVDを完全に行うか　メモリを効率的にしたいならFalse
     Returns:
         Y_hat: Normalized data matrix
         x_hat: Row scaling vector
@@ -340,7 +355,13 @@ def dyson_equalizer_algorithm1(Y):
 
     # 1: Compute the SVD of Y
     # U: m x m, sigma: m, V_h: n x n
-    U, sigma, V_h = np.linalg.svd(Y, full_matrices=True)
+
+    Y = np.asarray(Y)
+    Y = np.nan_to_num(Y, nan=0.0, posinf=0.0, neginf=0.0)
+    Y = Y.astype(np.float64, copy=False)
+    Y = np.ascontiguousarray(Y)
+
+    U, sigma, V_h = np.linalg.svd(Y, full_matrices=full_matrices)
     V = V_h.T  # V \in R^{n x n} (右特異ベクトルを列に持つ行列)
 
     # 2: Set eta as the median singular value of Y
@@ -363,8 +384,15 @@ def dyson_equalizer_algorithm1(Y):
     g2_norm1 = np.sum(np.abs(g2_hat))
 
     # 論文 (4) 式の計算
-    x_hat = (1 / np.sqrt(m - eta * g1_norm1)) * ((1 / g1_hat) - eta)
-    y_hat = (1 / np.sqrt(n - eta * g2_norm1)) * ((1 / g2_hat) - eta)
+    denom_x = np.maximum(m - eta * g1_norm1, 1e-12)
+    denom_y = np.maximum(n - eta * g2_norm1, 1e-12)
+
+    # g1_hat, g2_hat が 0 になることによるゼロ除算の防止
+    g1_hat_safe = np.where(np.abs(g1_hat) < 1e-12, 1e-12, g1_hat)
+    g2_hat_safe = np.where(np.abs(g2_hat) < 1e-12, 1e-12, g2_hat)
+
+    x_hat = (1 / np.sqrt(denom_x)) * ((1 / g1_hat_safe) - eta)
+    y_hat = (1 / np.sqrt(denom_y)) * ((1 / g2_hat_safe) - eta)
 
     # 数値的安定性のための安全策（負値の平方根エラー回避）
     x_hat = np.maximum(1e-12, x_hat)
@@ -378,11 +406,13 @@ def dyson_equalizer_algorithm1(Y):
 
 
 
+
+
 def bema_loss(sigma2_proposal, evals_emp, gamma, p, alpha):
         """
         BEMAの損失関数 (BEMA.Rの `loss` 関数に相当)
-        提案された分散 sigma^2 に基づいてMP分布に従うランダム行列をシミュレートし、
-        経験的固有値のバルク部分（分位数）との二乗誤差を計算します。
+        提案された分散 sigma^2 に基づいてMP分布に従うランダム行列をシミュレートし，
+        経験的固有値のバルク部分（分位数）との二乗誤差を計算します．
         """
         n = int(p / gamma)
         L = np.zeros((10, p))
@@ -398,8 +428,8 @@ def bema_loss(sigma2_proposal, evals_emp, gamma, p, alpha):
             
         evals_sim_mean = np.mean(L, axis=0)
         
-        # alpha に基づいて、分布の「端（スパイクや微小固有値）」を切り落とす
-        # 例: alpha=0.2 の場合、上位20%と下位20%を無視し、中間の60%のバルクだけで比較する
+        # alpha に基づいて，分布の「端（スパイクや微小固有値）」を切り落とす
+        # 例: alpha=0.2 の場合，上位20%と下位20%を無視し，中間の60%のバルクだけで比較する
         idx_start = int(min(p, n) * alpha)
         idx_end = int(min(p, n) * (1 - alpha))
         
@@ -412,10 +442,10 @@ def bema_loss(sigma2_proposal, evals_emp, gamma, p, alpha):
 
 def apply_bema(evals_emp, gamma, p, alpha=0.2):
     """
-    BEMAアルゴリズムを実行し、真の分散 sigma^2 を推定します。
+    BEMAアルゴリズムを実行し，真の分散 sigma^2 を推定します．
     """
     print("BEMAによる分散推定を実行中...")
-    # scipy.optimize.minimize_scalar を用いて、損失関数を最小化する分散を探索
+    # scipy.optimize.minimize_scalar を用いて，損失関数を最小化する分散を探索
     res = opt.minimize_scalar(
         bema_loss, 
         args=(evals_emp, gamma, p, alpha), 
@@ -427,17 +457,17 @@ def apply_bema(evals_emp, gamma, p, alpha=0.2):
 
 def tw1_quantile(beta=0.1):
     """
-    Type-I Tracy-Widom 分布の (1-beta) 分位点を返す。
+    Type-I Tracy-Widom 分布の (1-beta) 分位点を返す．
 
-    scipy に tracywidom がある環境ではそれを使用。
-    ない場合は代表的な近似値を使う。
+    scipy に tracywidom がある環境ではそれを使用．
+    ない場合は代表的な近似値を使う．
     """
     try:
         from scipy.stats import tracywidom
         return tracywidom.ppf(1 - beta, beta=1)
     except Exception:
         # Type-I Tracy-Widom TW1 の代表的な分位点近似
-        # beta は右側確率。つまり返すのは 1-beta quantile。
+        # beta は右側確率．つまり返すのは 1-beta quantile．
         table = {
             0.20: -0.165,
             0.10:  0.450,
@@ -467,10 +497,10 @@ def mp_pdf_zero_excluded(x, gamma, sigma2=1.0):
     zero-excluded Marchenko-Pastur density.
 
     gamma = p / n.
-    sigma2 = 1 のとき標準MP分布。
+    sigma2 = 1 のとき標準MP分布．
 
-    gamma > 1 の場合、p x p sample covariance にはゼロ固有値が出るので、
-    非ゼロ固有値に条件づけた zero-excluded density を使う。
+    gamma > 1 の場合，p x p sample covariance にはゼロ固有値が出るので，
+    非ゼロ固有値に条件づけた zero-excluded density を使う．
     """
     x = np.asarray(x)
 
@@ -483,8 +513,8 @@ def mp_pdf_zero_excluded(x, gamma, sigma2=1.0):
     xm = x[mask]
 
     # classical MP density の正規化係数は 2*pi*gamma*sigma2*x
-    # gamma > 1 では非ゼロ部分の質量が 1/gamma なので、
-    # zero-excluded にするため gamma 倍する。
+    # gamma > 1 では非ゼロ部分の質量が 1/gamma なので，
+    # zero-excluded にするため gamma 倍する．
     denom_gamma = min(gamma, 1.0)
 
     pdf[mask] = (
@@ -497,10 +527,10 @@ def mp_pdf_zero_excluded(x, gamma, sigma2=1.0):
 
 def mp_upper_quantiles(gamma, p_tilde, k_indices, grid_size=200000):
     """
-    sigma2=1 の zero-excluded MP 分布について、
-    k/p_tilde upper-quantile q_k を返す。
+    sigma2=1 の zero-excluded MP 分布について，
+    k/p_tilde upper-quantile q_k を返す．
 
-    k_indices は 1始まりの index を想定。
+    k_indices は 1始まりの index を想定．
     """
     a = (1 - np.sqrt(gamma)) ** 2
     b = (1 + np.sqrt(gamma)) ** 2
@@ -510,7 +540,7 @@ def mp_upper_quantiles(gamma, p_tilde, k_indices, grid_size=200000):
 
     pdf = mp_pdf_zero_excluded(x_grid, gamma, sigma2=1.0)
 
-    # 数値誤差補正のため、台形積分でCDFを作って正規化
+    # 数値誤差補正のため，台形積分でCDFを作って正規化
     dx = x_grid[1] - x_grid[0]
     cdf = np.cumsum(pdf) * dx
     cdf = cdf / cdf[-1]
@@ -532,12 +562,12 @@ def mp_upper_quantiles(gamma, p_tilde, k_indices, grid_size=200000):
 
 def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
     """
-    RMTstat::qmp(probs, ndf=ndf, pdim=pdim, var=var) 相当。
-    lower.tail=TRUE の下側分位点を返す。
+    RMTstat::qmp(probs, ndf=ndf, pdim=pdim, var=var) 相当．
+    lower.tail=TRUE の下側分位点を返す．
 
-    ndf >= pdim を想定。
+    ndf >= pdim を想定．
     gamma = pdim / ndf <= 1.
-    gamma=1 の下端特異性を避けるため、theta 変換でCDFを作る。
+    gamma=1 の下端特異性を避けるため，theta 変換でCDFを作る．
     """
     probs = np.asarray(probs, dtype=float)
 
@@ -591,12 +621,12 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
         S = Y Y^T / n
     または非ゼロ固有値として
         S_small = Y^T Y / n
-    の固有値を渡す。
+    の固有値を渡す．
 
     注意:
         元行列 W の特異値 s_i を使う場合は
             evals = s_i**2 / n
-        とする。
+        とする．
     """
     evals = np.asarray(evals, dtype=float)
     evals = evals[np.isfinite(evals)]
@@ -624,7 +654,7 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
         raise ValueError("Invalid alpha: selected bulk index set is empty.")
 
     # 重要:
-    # 非ゼロ固有値数が min_pn より少なくても、
+    # 非ゼロ固有値数が min_pn より少なくても，
     # k_end まで存在すれば BEMA 回帰は実行可能
     if len(evals_sorted) < k_end:
         raise ValueError(
@@ -690,8 +720,8 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
 
 def bema_algorithm1_from_data(Y, alpha=0.2, beta=0.1, center=False):
     """
-    Y は p x n として扱う。
-    sample covariance は S = Y Y^T / n。
+    Y は p x n として扱う．
+    sample covariance は S = Y Y^T / n．
     """
     Y = np.asarray(Y, dtype=float)
 
@@ -759,7 +789,7 @@ def gaussian_broadening_fit(evals, gamma_ratio, a=10):
         return pdf
 
     # 4. 最小二乗法のための目的関数の定義
-    # フィッティング範囲: スパイクの影響を排除するため、下位 90% のバルク領域でカーブを比較する
+    # フィッティング範囲: スパイクの影響を排除するため，下位 90% のバルク領域でカーブを比較する
     limit_idx = int(m * 0.90)
     x_eval = np.linspace(max(1e-5, evals_sorted[0]), evals_sorted[limit_idx], 200)
     P_val = P_gamma(x_eval) # 平滑化された経験的密度
