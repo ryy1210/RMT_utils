@@ -180,7 +180,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
     history = []
     
     print("【Step 0】ベースライン (圧縮なし) のPPLを計算します...")
-    baseline_ppl = get_ppl(model, tokenizer, dataset_name,seq_len=seq_len, batch_size=batch_size)
+    baseline_ppl = get_ppl(model, tokenizer, dataset_name,seq_len, batch_size)
     history.append({
         "step": 0,
         "layer_compressed": "baseline",
@@ -225,7 +225,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         model = get_lra_model(model, layer_name, W_hat)
         
         # 5. get_ppl でPPLを計算
-        current_ppl = get_ppl(model, tokenizer, dataset_name)
+        current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
         
         # 6. 結果を保存
         history.append({
