@@ -28,7 +28,11 @@ def get_calib_train_data(name, tokenizer, nsamples, seqlen=2048, seed=3, batch_s
         traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train', cache_dir=dataset_cache_dir)
         tot_text = "\n\n".join(traindata["sentence"])
     elif name == "wikitext2":
-        traindata = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train", cache_dir=dataset_cache_dir)
+        traindata = load_dataset(
+            'parquet', 
+            data_files={'train': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/train/0000.parquet'},
+            split='train'
+        )
         tot_text = "\n\n".join(traindata["text"])
     else:
         raise NotImplementedError
@@ -53,9 +57,16 @@ def get_calib_train_data(name, tokenizer, nsamples, seqlen=2048, seed=3, batch_s
 
 
 def get_wikitext2(nsamples, seed, seqlen, tokenizer, dataset_cache_dir=None):
-    traindata = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split='train', cache_dir=dataset_cache_dir)
-    testdata = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split='test', cache_dir=dataset_cache_dir)
-
+    traindata =traindata = load_dataset(
+            'parquet', 
+            data_files={'train': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/train/0000.parquet'},
+            split='train'
+        )
+    testdata = traindata = load_dataset(
+            'parquet', 
+            data_files={'train': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/train/0000.parquet'},
+            split='test'
+        )
     trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
@@ -218,7 +229,12 @@ def get_test_data(name, tokenizer, seq_len=2048, batch_size = 4):
         return IndexDataset(tensors=test_ids_batch)
     ####
     if 'wikitext2' in name:
-        test_data = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split='test')
+        # Hugging Face のバグを回避するため、Parquetファイルから直接ロードする
+        test_data = load_dataset(
+            'parquet', 
+            data_files={'test': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/test/0000.parquet'},
+            split='test'
+        )
         test_dataset = process_data(test_data, tokenizer, seq_len, 'text')
     if 'ptb' in name:
         test_data = load_dataset('ptb_text_only', 'penn_treebank', split='test')
