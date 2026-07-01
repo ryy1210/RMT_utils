@@ -10,6 +10,234 @@ from scipy import integrate
 from scipy.stats import norm
 from scipy.optimize import minimize, root_scalar
 from tqdm.auto import tqdm
+import random
+
+# ※事前に dyson_equalizer_algorithm1 および evaluater.py の ppl_eval がインポート可能な前提です
+from evaluater import ppl_eval
+
+# ==========================================
+# 補助関数 1: apply_lra_1
+# 1つの重み行列(Tensor)に対してLRAを行い、新しい重み行列を返す純粋な数学関数
+# ==========================================
+
+def apply_lra_1(W_raw, s_hat, DE=True, fast_SVD = False):
+    device = W_raw.device
+    dtype = W_raw.dtype
+    m_orig, n_orig = W_raw.shape
+
+    W_np = W_raw.detach().cpu().to(torch.float32).numpy()
+
+    transposed = False
+    if m_orig > n_orig:
+        W_np = W_np.T
+        transposed = True
+
+    m, n = W_np.shape
+
+    if DE:
+        # 1. Dyson Equalizer
+        Y_hat, x_hat, y_hat = dyson_equalizer_algorithm1(W_np)
+        Y_hat = np.nan_to_num(Y_hat, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # 2. SVD と 低ランク近似
+        # 安全化
+        x_hat = np.clip(np.asarray(x_hat).flatten(), 1e-8, None)
+        y_hat = np.clip(np.asarray(y_hat).flatten(), 1e-8, None)
+        Y_hat_tensor = torch.from_numpy(Y_hat).to(device=device, dtype=torch.float32)
+
+        if fast_SVD:
+            q = min(max(s_hat + 5, 2*s_hat), min(m, n))
+            U_approx, S_approx, V_approx = torch.svd_lowrank(Y_hat_tensor, q=q) # Vの出力の仕方が通常のSVDとは違う
+
+            U_hat = U_approx[:, :s_hat]
+            S_hat = torch.diag(S_approx[:s_hat])
+            Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
+        else:
+            U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
+
+            
+            U_hat = U[:, :s_hat]
+            S_hat = torch.diag(S[:s_hat])
+            Vh_hat = Vh[:s_hat, :]
+
+        W_tilde = U_hat @ S_hat @ Vh_hat # 形状: (m, n)
+        
+        # 3. Re-coloring (復元）
+        x_hat_flat = np.asarray(x_hat).flatten()
+        y_hat_flat = np.asarray(y_hat).flatten()
+        
+        
+        eps = 1e-12
+
+        D_x_sqrt = torch.tensor(
+            np.sqrt(x_hat_flat + eps),
+            device=device,
+            dtype=torch.float32
+        )
+
+        D_y_sqrt = torch.tensor(
+            np.sqrt(y_hat_flat + eps),
+            device=device,
+            dtype=torch.float32
+        )
+
+        # ブロードキャスト計算
+        # print("W_tilde.shape:", W_tilde.shape)
+        # print("D_x_sqrt.shape:", D_x_sqrt.shape)
+        # print("D_y_sqrt.shape:", D_y_sqrt.shape)
+        W_hat = W_tilde * D_x_sqrt.unsqueeze(1) * D_y_sqrt.unsqueeze(0)
+        
+    else:
+        # 通常の SVD         
+        W_tensor = torch.tensor(W_np, device=device, dtype=torch.float32)
+        if fast_SVD:
+            q = min(max(s_hat + 5, 2*s_hat), min(m, n))
+            U_approx, S_approx, V_approx = torch.svd_lowrank(W_tensor, q=q) # Vの出力の仕方が通常のSVDとは違う
+
+            U_hat = U_approx[:, :s_hat]
+            S_hat = torch.diag(S_approx[:s_hat])
+            Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
+        else:
+            U, S, Vh = torch.linalg.svd(W_tensor, full_matrices=False)
+
+            U_hat = U[:, :s_hat]
+            S_hat = torch.diag(S[:s_hat])
+            Vh_hat = Vh[:s_hat, :]
+
+        W_hat = U_hat @ S_hat @ Vh_hat
+
+
+    if transposed:
+        W_hat = W_hat.T
+
+    W_hat = torch.clamp(W_hat, -65504.0, 65504.0)
+
+    if W_hat.shape != W_raw.shape:
+        raise RuntimeError("Shape mismatch after LRA")
+
+    return W_hat.to(dtype)
+
+# ==========================================
+# 補助関数 2: get_lra_model
+# モデルの特定の層の重みを、計算済みのLRA重み行列で置き換える
+# ==========================================
+def get_lra_model(model, layer_name, W_hat_new):
+    """
+    指定されたLinear層の重みを安全に更新する
+    """
+    for name, module in model.named_modules():
+        if name == layer_name and isinstance(module, nn.Linear):
+
+            # shapeチェック
+            if module.weight.shape != W_hat_new.shape:
+                raise ValueError(
+                    f"Shape mismatch: {module.weight.shape} vs {W_hat_new.shape}"
+                )
+
+            # device / dtypeを合わせる
+            W_hat_new = W_hat_new.to(module.weight.device).to(module.weight.dtype)
+
+            # 安全にコピー
+            with torch.no_grad():
+                module.weight.copy_(W_hat_new)
+
+            break
+
+    return model
+
+# ==========================================
+# 補助関数 3: get_ppl
+# モデルのPerplexityを計算するラッパー関数
+# ==========================================
+def get_ppl(model, tokenizer, dataset_name='wikitext2', seq_len=2048, batch_size=4):
+    """
+    evaluater.py の ppl_eval を用いてPPLを計算する。
+    """
+    print(f"  > 評価中 ({dataset_name})...", end="")
+    # ppl_eval は辞書を返す仕様（例: {'wikitext2': 12.34}）
+    ppl_dict = ppl_eval(model, tokenizer, datasets=[dataset_name], model_seq_len=seq_len, batch_size=batch_size)
+    ppl_val = ppl_dict[dataset_name]
+    print(f" PPL: {ppl_val:.4f}")
+    return ppl_val
+
+# ==========================================
+# メイン関数: run_lra_experiment
+# ==========================================
+def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, dataset_name='wikitext2', DE=True):
+    """
+    リストの順序に従って1層ずつLRAを適用し、PPLの推移を記録する。
+
+    Parameters:
+        model: 対象のPyTorchモデル
+        tokenizer: トークナイザー
+        results_df: get_esd_metrics 等で計算した alpha と s_hat が含まれるDataFrame
+        lra_list: 圧縮を行う順番に並んだレイヤー名のリスト (list of str)
+        max_lra_layers: 実験を行う最大層数
+    Returns:
+        history_df: 実験結果の推移をまとめたDataFrame
+    """
+    results_indexed = results_df.set_index('name')
+    history = []
+    
+    print("【Step 0】ベースライン (圧縮なし) のPPLを計算します...")
+    baseline_ppl = get_ppl(model, tokenizer, dataset_name)
+    history.append({
+        "step": 0,
+        "layer_compressed": "baseline",
+        "alpha_of_layer": np.nan,
+        "ppl": baseline_ppl
+    })
+    
+    # 実行するレイヤー数を制限
+    target_layers = lra_list[:max_lra_layers]
+    
+    for i, layer_name in enumerate(target_layers):
+        step = i + 1
+        print(f"\n【Step {step}/{max_lra_layers}】層を圧縮中: {layer_name}")
+        
+        # 1. 圧縮に必要なメタデータ(s_hat, alpha)を取得
+        if layer_name not in results_indexed.index:
+            print(f"  [警告] {layer_name} の解析結果が見つかりません。スキップします。")
+            continue
+            
+        row = results_indexed.loc[layer_name]
+        alpha = row['alpha']
+        s_col = 's_hat_postDE' if DE else 's_hat_preDE'
+        s_hat = int(row[s_col])
+        
+        # 2. モデルから元の重みを取得
+        target_module = None
+        for name, mod in model.named_modules():
+            if name == layer_name:
+                target_module = mod
+                break
+                
+        if target_module is None:
+            print(f"  [警告] モジュール {layer_name} がモデル内に見つかりません。")
+            continue
+            
+        W_raw = target_module.weight.data
+        
+        # 3. apply_lra_1 で新しい重みを計算
+        W_hat = apply_lra_1(W_raw, s_hat, DE=DE)
+        
+        # 4. get_lra_model でモデルに適用
+        model = get_lra_model(model, layer_name, W_hat)
+        
+        # 5. get_ppl でPPLを計算
+        current_ppl = get_ppl(model, tokenizer, dataset_name)
+        
+        # 6. 結果を保存
+        history.append({
+            "step": step,
+            "layer_compressed": layer_name,
+            "alpha_of_layer": alpha,
+            "ppl": current_ppl
+        })
+        
+    print("\n✅ 実験完了！")
+    return pd.DataFrame(history)
+
 
 
 def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
@@ -400,7 +628,7 @@ def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
             # print("finite:", np.isfinite(W_np).all())
             # print("min/max:", np.min(W_np), np.max(W_np))
 
-            # --- 💡 縦長行列 (m > n) の自動転置 ---
+            # ---  縦長行列 (m > n) の自動転置 ---
             # DE関数は m <= n を要求するため、縦長なら転置して横長にする
             transposed = False
             if m_orig > n_orig:
