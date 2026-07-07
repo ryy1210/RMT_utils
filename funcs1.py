@@ -179,13 +179,18 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
     results_indexed = results_df.set_index('name')
     history = []
     
-    print("【Step 0】ベースライン (圧縮なし) のPPLを計算します...")
+    # 💡 [追加] モデル全体の元のパラメータ数を計算
+    total_original_params = sum(p.numel() for p in model.parameters())
+    current_total_params = total_original_params
+    
+    print(f"【Step 0】ベースライン (圧縮なし) のPPLを計算します... (総パラメータ数: {total_original_params:,})")
     baseline_ppl = get_ppl(model, tokenizer, dataset_name,seq_len, batch_size)
     history.append({
         "step": 0,
         "layer_compressed": "baseline",
         "alpha_of_layer": np.nan,
-        "ppl": baseline_ppl
+        "ppl": baseline_ppl,
+        "reduction_ratio_percent": 0.0  # 💡 [追加] ベースラインは削減率 0%
     })
     
     # 実行するレイヤー数を制限
@@ -198,6 +203,13 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         # 1. 圧縮に必要なメタデータ(s_hat, alpha)を取得
         if layer_name not in results_indexed.index:
             print(f"  [警告] {layer_name} の解析結果が見つかりません。スキップします。")
+            history.append({
+                "step": step,
+                "layer_compressed": f"{layer_name} (スキップ)",
+                "alpha_of_layer": np.nan,
+                "ppl": history[-1]['ppl'], # 前回のPPLを引き継ぎ
+                "reduction_ratio_percent": history[-1]['reduction_ratio_percent']
+            })
             continue
             
         row = results_indexed.loc[layer_name]
@@ -217,23 +229,34 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
             continue
             
         W_raw = target_module.weight.data
+        m_orig, n_orig = W_raw.shape
         
-        # 3. apply_lra_1 で新しい重みを計算
+        # 💡 [追加] パラメータ削減量の計算
+        original_layer_params = m_orig * n_orig
+        compressed_layer_params = s_hat * (m_orig + n_orig)
+        params_saved = original_layer_params - compressed_layer_params
+        
+        if params_saved > 0:
+            current_total_params -= params_saved
+            
+        current_reduction_ratio = (1.0 - current_total_params / total_original_params) * 100
+        
+        # --- LRAの適用とPPL計算 ---
         W_hat = apply_lra_1(W_raw, s_hat, DE=DE)
-        
-        # 4. get_lra_model でモデルに適用
         model = get_lra_model(model, layer_name, W_hat)
-        
-        # 5. get_ppl でPPLを計算
         current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
+
         
-        # 6. 結果を保存
+        # 結果を保存
         history.append({
             "step": step,
             "layer_compressed": layer_name,
             "alpha_of_layer": alpha,
-            "ppl": current_ppl
+            "ppl": current_ppl,
+            "reduction_ratio_percent": current_reduction_ratio # 💡 [追加] 削減率を保存
         })
+        
+        print(f"  -> 現在の累積パラメータ削減率: {current_reduction_ratio:.2f}%")
         
     print("\n✅ 実験完了！")
     return pd.DataFrame(history)
