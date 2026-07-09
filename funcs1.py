@@ -277,7 +277,7 @@ def run_pruning_experiment(
     dataset_name='wikitext2',
     seq_len=2048,
     batch_size=4,
-    sparsity=[0.3, 0.5, 0.7],
+    sparsity=0.5,
     alpha_prune=True,
     prune_metric="magnitude",
     blockwise=False,
@@ -297,8 +297,7 @@ def run_pruning_experiment(
     dataset_name : str
     seq_len : int
     batch_size : int
-    sparsity : list[float]
-        試す sparsity のリスト
+    sparsity : float
     alpha_prune : bool
     prune_metric : str
         "magnitude" or "random"
@@ -330,50 +329,47 @@ def run_pruning_experiment(
         }
     )
 
-    for sp in sparsity:
+    sp = sparsity
 
-        print("\n" + "=" * 80)
-        print(f"Target sparsity = {sp:.3f}")
-        print("=" * 80)
+    print("\n" + "=" * 80)
+    print(f"Target sparsity = {sp:.3f}")
+    print("=" * 80)
 
-        # 元モデルを保持
-        pruned_model = deepcopy(model)
+    # 枝刈り
+    pruned_model, log_info = alpha_prune_llama(
+        pruned_model,
+        results_df,
+        sparsity=sp,
+        alpha_prune=alpha_prune,
+        prune_metric=prune_metric,
+        blockwise=blockwise,
+        alpha_reverse=alpha_reverse,
+    )
 
-        # 枝刈り
-        pruned_model, log_info = alpha_prune_llama(
-            pruned_model,
-            results_df,
-            sparsity=sp,
-            alpha_prune=alpha_prune,
-            prune_metric=prune_metric,
-            blockwise=blockwise,
-            alpha_reverse=alpha_reverse,
-        )
+    # 枝刈り完了時点でログ表示
+    print("\n[Pruning Log]")
+    print(log_info)
 
-        # 枝刈り完了時点でログ表示
-        print("\n[Pruning Log]")
-        print(log_info)
+    # 実際の sparsity
+    actual_sparsity = check_sparsity(pruned_model)
+    print(f"Actual sparsity = {actual_sparsity:.6f}")
 
-        # 実際の sparsity
-        actual_sparsity = check_sparsity(pruned_model)
-        print(f"Actual sparsity = {actual_sparsity:.6f}")
+    # PPL評価
+    ppl = get_ppl(
+        pruned_model,
+        tokenizer,
+        dataset_name=dataset_name,
+        seq_len=seq_len,
+        batch_size=batch_size,
+    )
 
-        # PPL評価
-        ppl = get_ppl(
-            pruned_model,
-            tokenizer,
-            dataset_name=dataset_name,
-            seq_len=seq_len,
-            batch_size=batch_size,
-        )
-
-        history.append(
-            {
-                "sparsity": sp,
-                "actual_pruning": actual_sparsity,
-                "ppl": ppl,
-            }
-        )
+    history.append(
+        {
+            "sparsity": sp,
+            "actual_pruning": actual_sparsity,
+            "ppl": ppl,
+        }
+    )
 
     history_df = pd.DataFrame(history)
 
