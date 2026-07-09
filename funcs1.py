@@ -267,7 +267,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
 from copy import deepcopy
 import pandas as pd
 
-from prune_utils import alpha_prune_llama
+from prune_utils import alpha_prune_llama, check_sparsity
 
 
 def run_pruning_experiment(
