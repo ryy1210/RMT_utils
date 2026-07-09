@@ -263,6 +263,124 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
 
 
 
+
+from copy import deepcopy
+import pandas as pd
+
+from prune_utils import alpha_prune_llama
+
+
+def run_pruning_experiment(
+    model,
+    tokenizer,
+    results_df,
+    dataset_name='wikitext2',
+    seq_len=2048,
+    batch_size=4,
+    sparsity=[0.3, 0.5, 0.7],
+    alpha_prune=True,
+    prune_metric="magnitude",
+    blockwise=False,
+    alpha_reverse=False,
+):
+    """
+    Alpha Pruning → PPL評価 をまとめて実行する。
+
+    Parameters
+    ----------
+    model : nn.Module
+        対象モデル
+    tokenizer
+        tokenizer
+    results_df : pd.DataFrame
+        get_esd_metrics() の結果
+    dataset_name : str
+    seq_len : int
+    batch_size : int
+    sparsity : list[float]
+        試す sparsity のリスト
+    alpha_prune : bool
+    prune_metric : str
+        "magnitude" or "random"
+    blockwise : bool
+
+    Returns
+    -------
+    pd.DataFrame
+        各 sparsity に対する PPL を記録した DataFrame
+    """
+
+    history = []
+
+    # Baseline
+    print("【Baseline】PPL計算")
+    baseline_ppl = get_ppl(
+        model,
+        tokenizer,
+        dataset_name=dataset_name,
+        seq_len=seq_len,
+        batch_size=batch_size,
+    )
+
+    history.append(
+        {
+            "sparsity": 0.0,
+            "actual_pruning": 0.0,
+            "ppl": baseline_ppl,
+        }
+    )
+
+    for sp in sparsity:
+
+        print("\n" + "=" * 80)
+        print(f"Target sparsity = {sp:.3f}")
+        print("=" * 80)
+
+        # 元モデルを保持
+        pruned_model = deepcopy(model)
+
+        # 枝刈り
+        pruned_model, log_info = alpha_prune_llama(
+            pruned_model,
+            results_df,
+            sparsity=sp,
+            alpha_prune=alpha_prune,
+            prune_metric=prune_metric,
+            blockwise=blockwise,
+            alpha_reverse=alpha_reverse,
+        )
+
+        # 枝刈り完了時点でログ表示
+        print("\n[Pruning Log]")
+        print(log_info)
+
+        # 実際の sparsity
+        actual_sparsity = check_sparsity(pruned_model)
+        print(f"Actual sparsity = {actual_sparsity:.6f}")
+
+        # PPL評価
+        ppl = get_ppl(
+            pruned_model,
+            tokenizer,
+            dataset_name=dataset_name,
+            seq_len=seq_len,
+            batch_size=batch_size,
+        )
+
+        history.append(
+            {
+                "sparsity": sp,
+                "actual_pruning": actual_sparsity,
+                "ppl": ppl,
+            }
+        )
+
+    history_df = pd.DataFrame(history)
+
+    return history_df
+
+
+
 def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
     """
     モデル内の全線形層（Conv2d, Linear）に対してESD関連のメトリクスを計算する関数

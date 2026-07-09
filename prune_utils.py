@@ -422,3 +422,169 @@ def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
             subset[name].weight.data[W_mask] = 0
             
     print("Block-wise Pruning completed successfully.")
+
+
+import torch
+import torch.nn as nn
+import pandas as pd
+import numpy as np
+from tqdm.auto import tqdm
+
+# 事前に定義されている想定の関数
+# def find_layers(module, layers=[nn.Linear], name=''): ...
+
+def compute_mask_2(W_metric, sparsity):
+    """
+    重要度スコア（W_metric）に基づいて、下位(sparsity)の要素をゼロにするマスクを生成する。
+    Args:
+        W_metric (torch.Tensor): 評価する指標（絶対値やランダム値）
+        sparsity (float): ゼロにする割合 (0.0 ~ 1.0)
+    Returns:
+        torch.Tensor (bool): 残す要素がTrueのマスク
+    """
+    if sparsity <= 0:
+        return torch.ones_like(W_metric, dtype=torch.bool)
+    if sparsity >= 1:
+        return torch.zeros_like(W_metric, dtype=torch.bool)
+    
+    # テンソルを1次元に平坦化してソート
+    W_metric_flat = W_metric.flatten()
+    k = int(round(sparsity * W_metric_flat.numel()))
+    
+    if k == 0:
+        return torch.ones_like(W_metric, dtype=torch.bool)
+        
+    # k番目に小さい値を閾値として取得
+    threshold, _ = torch.kthvalue(W_metric_flat, k)
+    
+    # 閾値より大きい要素を残す（True）
+    mask = W_metric > threshold
+    return mask
+
+def alpha_prune_llama(model, results_df, sparsity=0.5, alpha_prune=True, 
+                     prune_metric="magnitude", blockwise=False, alpha_reverse=False):
+    """
+    LLaMAモデルに対してAlpha Pruning (または Uniform/Random/Magnitude Pruning) を実行する。
+    
+    Args:
+        model: 対象のPyTorchモデル (Hugging Face LLaMA)
+        results_df (pd.DataFrame): get_esd_metrics で計算した各層の 'alpha' を含むデータフレーム
+        sparsity (float): モデル全体（またはブロック全体）で削減するパラメータの目標割合 (0.0 ~ 1.0)
+        alpha_prune (bool): True なら alpha に基づいて層ごとに sparsity を変える。False なら全層一律。
+        prune_metric (str): 'magnitude' (絶対値の小さいものを削る) または 'random' (ランダムに削る)
+        blockwise (bool): True なら Transformer の各ブロック内で個別に alpha 評価を行う。False ならモデル全体。
+        alpha_reverse (bool):False の場合:alpha が大きい層ほど多く枝刈りする。True の場合:alpha が小さい層ほど多く枝刈りする。
+        
+    Returns:
+        dict: 実行結果（各層の適用された sparsity などのログ）
+    """
+    print(f"--- 枝刈り開始 ---")
+    print(f"Target Sparsity: {sparsity*100:.1f}%, Alpha-based: {alpha_prune}, Metric: {prune_metric}, Blockwise: {blockwise}, alpha_reverse: {alpha_reverse}")
+    
+    # 結果DataFrameの準備
+    if 'name' in results_df.columns:
+        results_df = results_df.set_index('name')
+        
+    log_info = {}
+    
+    # 1. 枝刈り対象の Linear 層をすべて取得
+    # LLaMAの実装に合わせる（HuggingFaceの場合 model.model.layers にブロックが格納されている）
+    try:
+        blocks = model.model.layers
+    except AttributeError:
+        # フォールバック: モデル直下から探す
+        blocks = [model]
+        blockwise = False
+        print("警告: LLaMAの標準ブロック構造が見つからないため、Layerwiseにフォールバックします。")
+
+    for block_idx, block in enumerate(tqdm(blocks, desc="Pruning Blocks")):
+        # ブロック内の全Linear層を取得
+        layer_dict = find_layers(block, layers=[nn.Linear], name=f"model.layers.{block_idx}")
+        
+        if not layer_dict:
+            continue
+            
+        # ----------------------------------------------------
+        # スケジューリング: 各層の sparsity (s_l) を計算
+        # ----------------------------------------------------
+        layer_sparsities = {}
+        
+        if alpha_prune:
+            # --- Alpha Pruning の計算 ---
+            alphas = []
+            valid_names = []
+            
+            # 評価対象の層（ブロックごと、または事前に全体から取得）
+            eval_layers = layer_dict if blockwise else find_layers(model, layers=[nn.Linear])
+            
+            for name in eval_layers:
+                # 実際のモデルの層名と results_df のインデックスの形式合わせ（プレフィックスの調整など）が必要になる場合があります
+                # ここでは部分一致で検索する簡易ロジック
+                matched_row = results_df[results_df.index.str.endswith(name.split('.')[-1])]
+                
+                if not matched_row.empty:
+                    alphas.append(matched_row['alpha'].values[0])
+                    valid_names.append(name)
+            
+            if not alphas:
+                 # fallback to uniform if no alphas found
+                 layer_sparsities = {name: sparsity for name in layer_dict}
+            else:
+                 # Alpha-decay の数式に基づくスパースティの割り当て (Inverse scaling)
+                 # Alphaが大きい(ノイズが多い)層ほど、より多く削る (sparsityを高くする)
+                 alphas = np.array(alphas, dtype=np.float64)
+
+                 eps = 1e-12
+
+                 if alpha_reverse:
+                     alpha_scores = 1.0 / (alphas + eps) # alphaが小さいほど多く枝刈りしたいので逆数にする
+                 else:
+                     alpha_scores = alphas
+                 # softmax的な重み付け、あるいは単純な線形スケーリング
+                 # ここでは layer-wise_pruning の考え方に基づき、alphaに比例したペナルティを課す
+                 alpha_weights = alpha_scores / np.sum(alpha_scores)
+                 
+                 # 目標の平均 sparsity になるように調整
+                 # (実際のパラメータ数の違いはここでは簡略化し、層の数で平均化)
+                 scaled_sparsities = alpha_weights * sparsity * len(alphas)
+                 
+                 # 0~1の範囲にクリッピング
+                 scaled_sparsities = np.clip(scaled_sparsities, 0.0, 0.99)
+                 
+                 # 現在のブロックの辞書に格納
+                 for idx, name in enumerate(valid_names):
+                     if name in layer_dict:
+                         layer_sparsities[name] = scaled_sparsities[idx]
+        else:
+            # --- Uniform Pruning ---
+            layer_sparsities = {name: sparsity for name in layer_dict}
+
+        # ----------------------------------------------------
+        # マスキングと重みのゼロ化の実行
+        # ----------------------------------------------------
+        for name, layer in layer_dict.items():
+            s_l = layer_sparsities.get(name, sparsity)
+            W_raw = layer.weight.data
+            
+            if prune_metric == "magnitude":
+                # 重みの絶対値を重要度スコアとする（小さいものから削る）
+                W_metric = torch.abs(W_raw)
+            elif prune_metric == "random":
+                # ランダムな値を生成して重要度スコアとする
+                W_metric = torch.rand_like(W_raw)
+            else:
+                raise ValueError(f"Unknown prune_metric: {prune_metric}")
+                
+            # マスクの計算 (残す要素がTrue)
+            mask = compute_mask_2(W_metric, s_l)
+            
+            # In-place で重みにマスクを適用 (ゼロにする)
+            layer.weight.data.mul_(mask)
+            
+            log_info[name] = {
+                "applied_sparsity": s_l,
+                "metric": prune_metric
+            }
+
+    print("--- 枝刈り完了 ---")
+    return model, log_info
