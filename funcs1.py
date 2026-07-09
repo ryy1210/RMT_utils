@@ -269,7 +269,6 @@ import pandas as pd
 
 from prune_utils import alpha_prune_llama, check_sparsity
 
-
 def run_pruning_experiment(
     model,
     tokenizer,
@@ -307,54 +306,45 @@ def run_pruning_experiment(
     -------
     pd.DataFrame
         各 sparsity に対する PPL を記録した DataFrame
+    1つの sparsity に対して、
+    pruning -> log_info print -> PPL計算
+    を実行する関数。
+
+    注意:
+        この関数は model を in-place に枝刈りする。
+        複数 sparsity で独立実験したい場合は、
+        外側の for ループで毎回 model をロードし直すこと。
     """
 
-    history = []
-
-    # Baseline
-    print("【Baseline】PPL計算")
-    baseline_ppl = get_ppl(
-        model,
-        tokenizer,
-        dataset_name=dataset_name,
-        seq_len=seq_len,
-        batch_size=batch_size,
-    )
-
-    history.append(
-        {
-            "sparsity": 0.0,
-            "actual_pruning": 0.0,
-            "ppl": baseline_ppl,
-        }
-    )
-
-    sp = sparsity
-
     print("\n" + "=" * 80)
-    print(f"Target sparsity = {sp:.3f}")
+    print(f"Target sparsity = {sparsity:.3f}")
     print("=" * 80)
 
-    # 枝刈り
-    pruned_model, log_info = alpha_prune_llama(
-        pruned_model,
-        results_df,
-        sparsity=sp,
-        alpha_prune=alpha_prune,
-        prune_metric=prune_metric,
-        blockwise=blockwise,
-        alpha_reverse=alpha_reverse,
-    )
+    model.eval()
 
-    # 枝刈り完了時点でログ表示
-    print("\n[Pruning Log]")
+    # 枝刈り
+    with torch.no_grad():
+        pruned_model, log_info = alpha_prune_llama(
+            model,
+            results_df,
+            sparsity=sparsity,
+            alpha_prune=alpha_prune,
+            prune_metric=prune_metric,
+            blockwise=blockwise,
+            alpha_reverse=alpha_reverse,
+        )
+
+    # 枝刈り完了時点で log_info を print
+    print("\n[Pruning finished. log_info]")
     print(log_info)
 
-    # 実際の sparsity
+    # 実際の sparsity を計算
     actual_sparsity = check_sparsity(pruned_model)
-    print(f"Actual sparsity = {actual_sparsity:.6f}")
 
-    # PPL評価
+    print(f"Target sparsity : {sparsity:.6f}")
+    print(f"Actual sparsity : {actual_sparsity:.6f}")
+
+    # PPL 計算
     ppl = get_ppl(
         pruned_model,
         tokenizer,
@@ -363,17 +353,17 @@ def run_pruning_experiment(
         batch_size=batch_size,
     )
 
-    history.append(
-        {
-            "sparsity": sp,
-            "actual_pruning": actual_sparsity,
-            "ppl": ppl,
-        }
-    )
+    result = {
+        "target_sparsity": sparsity,
+        "actual_sparsity": actual_sparsity,
+        "ppl": ppl,
+        "alpha_prune": alpha_prune,
+        "alpha_reverse": alpha_reverse,
+        "prune_metric": prune_metric,
+        "blockwise": blockwise,
+    }
 
-    history_df = pd.DataFrame(history)
-
-    return history_df
+    return result
 
 
 
