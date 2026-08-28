@@ -53,12 +53,46 @@ def apply_lra_1(W_raw, s_hat, DE=True, fast_SVD = False):
             S_hat = torch.diag(S_approx[:s_hat])
             Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
         else:
-            U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
+            # U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
 
-            
-            U_hat = U[:, :s_hat]
-            S_hat = torch.diag(S[:s_hat])
-            Vh_hat = Vh[:s_hat, :]
+            # U_hat = U[:, :s_hat]
+            # S_hat = torch.diag(S[:s_hat])
+            # Vh_hat = Vh[:s_hat, :]
+
+            original_device = Y_hat_tensor.device
+            original_dtype = Y_hat_tensor.dtype
+
+            # SVDはCPU・float32で安定して実行
+            Y_svd = Y_hat_tensor.detach().to(
+                device="cpu",
+                dtype=torch.float32
+            )
+
+            U, S, Vh = torch.linalg.svd(
+                Y_svd,
+                full_matrices=False
+            )
+
+            # 必要なrankだけ残す
+            U = U[:, :s_hat]
+            S = torch.diag(S[:s_hat])
+            Vh = Vh[:s_hat, :]
+
+            # 後続の計算用に元のデバイスへ戻す
+            U = U.to(
+                device=original_device,
+                dtype=original_dtype
+            )
+            S = S.to(
+                device=original_device,
+                dtype=original_dtype
+            )
+            Vh = Vh.to(
+                device=original_device,
+                dtype=original_dtype
+            )
+
+            del Y_svd
 
         W_tilde = U_hat @ S_hat @ Vh_hat # 形状: (m, n)
         
@@ -163,7 +197,7 @@ def get_ppl(model, tokenizer, dataset_name='wikitext2', seq_len=2048, batch_size
 # ==========================================
 # メイン関数: run_lra_experiment
 # ==========================================
-def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, dataset_name='wikitext2', DE=True, seq_len=2048, batch_size=4):
+def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, dataset_name='wikitext2', DE=True,fast_SVD = False,  seq_len=2048, batch_size=4):
     """
     リストの順序に従って1層ずつLRAを適用し、PPLの推移を記録する。
 
@@ -173,6 +207,8 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         results_df: get_esd_metrics 等で計算した alpha と s_hat が含まれるDataFrame
         lra_list: 圧縮を行う順番に並んだレイヤー名のリスト (list of str)
         max_lra_layers: 実験を行う最大層数
+        DE: Trueならs_hat_postDE, Falseならs_hat_preDE
+        fast_SVD: 
     Returns:
         history_df: 実験結果の推移をまとめたDataFrame
     """
@@ -242,7 +278,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         current_reduction_ratio = (1.0 - current_total_params / total_original_params) * 100
         
         # --- LRAの適用とPPL計算 ---
-        W_hat = apply_lra_1(W_raw, s_hat, DE=DE)
+        W_hat = apply_lra_1(W_raw, s_hat, DE=DE, fast_SVD=fast_SVD)
         model = get_lra_model(model, layer_name, W_hat)
         current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
 
