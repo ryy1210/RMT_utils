@@ -74,20 +74,20 @@ def apply_lra_1(W_raw, s_hat, DE=True, fast_SVD = False):
             )
 
             # 必要なrankだけ残す
-            U = U[:, :s_hat]
-            S = torch.diag(S[:s_hat])
-            Vh = Vh[:s_hat, :]
+            U_hat = U[:, :s_hat]
+            S_hat = torch.diag(S[:s_hat])
+            Vh_hat = Vh[:s_hat, :]
 
             # 後続の計算用に元のデバイスへ戻す
-            U = U.to(
+            U_hat = U_hat.to(
                 device=original_device,
                 dtype=original_dtype
             )
-            S = S.to(
+            S_hat = S_hat.to(
                 device=original_device,
                 dtype=original_dtype
             )
-            Vh = Vh.to(
+            Vh_hat = Vh_hat.to(
                 device=original_device,
                 dtype=original_dtype
             )
