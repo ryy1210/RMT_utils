@@ -197,7 +197,7 @@ def get_ppl(model, tokenizer, dataset_name='wikitext2', seq_len=2048, batch_size
 # ==========================================
 # メイン関数: run_lra_experiment
 # ==========================================
-def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, dataset_name='wikitext2', DE=True,fast_SVD = False,  seq_len=2048, batch_size=4):
+def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, dataset_name='wikitext2', DE=True,fast_SVD = False, PPLcalc = True,  seq_len=2048, batch_size=4):
     """
     リストの順序に従って1層ずつLRAを適用し、PPLの推移を記録する。
 
@@ -209,6 +209,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         max_lra_layers: 実験を行う最大層数
         DE: Trueならs_hat_postDE, Falseならs_hat_preDE
         fast_SVD: 
+        PPLcalc: 一層LoRAするごとにPPLを計算するかどうか
     Returns:
         history_df: 実験結果の推移をまとめたDataFrame
     """
@@ -280,7 +281,11 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         # --- LRAの適用とPPL計算 ---
         W_hat = apply_lra_1(W_raw, s_hat, DE=DE, fast_SVD=fast_SVD)
         model = get_lra_model(model, layer_name, W_hat)
-        current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
+        if PPLcalc:
+            current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
+        else:
+            current_ppl = None
+            print('skip PPL calculation')
 
         
         # 結果を保存
@@ -294,6 +299,10 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         
         print(f"  -> 現在の累積パラメータ削減率: {current_reduction_ratio:.2f}%")
         
+    if PPLcalc == False:
+        print("==最終的なPPL==")
+        current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
+
     print("\n✅ 実験完了！")
     return pd.DataFrame(history)
 
