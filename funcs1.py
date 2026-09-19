@@ -11,6 +11,8 @@ from scipy.stats import norm
 from scipy.optimize import minimize, root_scalar
 from tqdm.auto import tqdm
 import random
+from functools import lru_cache
+import warnings
 
 # ※事前に dyson_equalizer_algorithm1 および evaluater.py の ppl_eval がインポート可能な前提です
 from evaluater import ppl_eval
@@ -20,141 +22,51 @@ from evaluater import ppl_eval
 # 1つの重み行列(Tensor)に対してLRAを行い、新しい重み行列を返す純粋な数学関数
 # ==========================================
 
-def apply_lra_1(W_raw, s_hat, DE=True, fast_SVD = False):
-    device = W_raw.device
-    dtype = W_raw.dtype
-    m_orig, n_orig = W_raw.shape
-
-    W_np = W_raw.detach().cpu().to(torch.float32).numpy()
-
-    transposed = False
-    if m_orig > n_orig:
-        W_np = W_np.T
-        transposed = True
-
-    m, n = W_np.shape
-
+@torch.no_grad()
+def apply_lra_1(W_raw, s_hat, DE=True, fast_SVD=False):
+    """Colab互換: 元のshape/device/dtypeで切断SVDの近似行列を返す。"""
+    if W_raw.ndim != 2 or not W_raw.is_floating_point():
+        raise ValueError("W_raw must be a real floating-point matrix")
+    rank = min(W_raw.shape)
+    if int(s_hat) != s_hat or not 0 <= s_hat <= rank:
+        raise ValueError("s_hat must be an integer between 0 and min(shape)")
+    s_hat = int(s_hat)
+    if not torch.isfinite(W_raw).all():
+        raise ValueError("W_raw contains NaN/Inf")
+    # 修正: rank=0/fullでは分解不要。full rankは丸め誤差なしで元の重みを返す。
+    if s_hat == 0:
+        return torch.zeros_like(W_raw)
+    if s_hat == rank:
+        return W_raw.detach().clone()
+    transposed = W_raw.shape[0] > W_raw.shape[1]
+    W = W_raw.detach().T if transposed else W_raw.detach()
     if DE:
-        # 1. Dyson Equalizer
-        Y_hat, x_hat, y_hat = dyson_equalizer_algorithm1(W_np)
-        Y_hat = np.nan_to_num(Y_hat, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # 2. SVD と 低ランク近似
-        # 安全化
-        x_hat = np.clip(np.asarray(x_hat).flatten(), 1e-8, None)
-        y_hat = np.clip(np.asarray(y_hat).flatten(), 1e-8, None)
-        Y_hat_tensor = torch.from_numpy(Y_hat).to(device=device, dtype=torch.float32)
-
-        if fast_SVD:
-            q = min(max(s_hat + 5, 2*s_hat), min(m, n))
-            U_approx, S_approx, V_approx = torch.svd_lowrank(Y_hat_tensor, q=q) # Vの出力の仕方が通常のSVDとは違う
-
-            U_hat = U_approx[:, :s_hat]
-            S_hat = torch.diag(S_approx[:s_hat])
-            Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
-        else:
-            # U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
-
-            # U_hat = U[:, :s_hat]
-            # S_hat = torch.diag(S[:s_hat])
-            # Vh_hat = Vh[:s_hat, :]
-
-            original_device = Y_hat_tensor.device
-            original_dtype = Y_hat_tensor.dtype
-
-            # SVDはCPU・float32で安定して実行
-            Y_svd = Y_hat_tensor.detach().to(
-                device="cpu",
-                dtype=torch.float32
-            )
-
-            U, S, Vh = torch.linalg.svd(
-                Y_svd,
-                full_matrices=False
-            )
-
-            # 必要なrankだけ残す
-            U_hat = U[:, :s_hat]
-            S_hat = torch.diag(S[:s_hat])
-            Vh_hat = Vh[:s_hat, :]
-
-            # 後続の計算用に元のデバイスへ戻す
-            U_hat = U_hat.to(
-                device=original_device,
-                dtype=original_dtype
-            )
-            S_hat = S_hat.to(
-                device=original_device,
-                dtype=original_dtype
-            )
-            Vh_hat = Vh_hat.to(
-                device=original_device,
-                dtype=original_dtype
-            )
-
-            del Y_svd
-
-        W_tilde = U_hat @ S_hat @ Vh_hat # 形状: (m, n)
-        
-        # 3. Re-coloring (復元）
-        x_hat_flat = np.asarray(x_hat).flatten()
-        y_hat_flat = np.asarray(y_hat).flatten()
-        
-        
-        eps = 1e-12
-
-        D_x_sqrt = torch.tensor(
-            np.sqrt(x_hat_flat + eps),
-            device=device,
-            dtype=torch.float32
-        )
-
-        D_y_sqrt = torch.tensor(
-            np.sqrt(y_hat_flat + eps),
-            device=device,
-            dtype=torch.float32
-        )
-
-        # ブロードキャスト計算
-        # print("W_tilde.shape:", W_tilde.shape)
-        # print("D_x_sqrt.shape:", D_x_sqrt.shape)
-        # print("D_y_sqrt.shape:", D_y_sqrt.shape)
-        W_hat = W_tilde * D_x_sqrt.unsqueeze(1) * D_y_sqrt.unsqueeze(0)
-        
+        Y, x, y = dyson_equalizer_algorithm1(W.float().cpu().numpy(), full_matrices=False)
+        matrix = torch.as_tensor(Y, dtype=torch.float32, device=W.device)
     else:
-        # 通常の SVD         
-        W_tensor = torch.tensor(W_np, device=device, dtype=torch.float32)
-        if fast_SVD:
-            q = min(max(s_hat + 5, 2*s_hat), min(m, n))
-            U_approx, S_approx, V_approx = torch.svd_lowrank(W_tensor, q=q) # Vの出力の仕方が通常のSVDとは違う
-
-            U_hat = U_approx[:, :s_hat]
-            S_hat = torch.diag(S_approx[:s_hat])
-            Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
-        else:
-            U, S, Vh = torch.linalg.svd(W_tensor, full_matrices=False)
-
-            U_hat = U[:, :s_hat]
-            S_hat = torch.diag(S[:s_hat])
-            Vh_hat = Vh[:s_hat, :]
-
-        W_hat = U_hat @ S_hat @ Vh_hat
-
-
+        matrix = W.float()
+    if fast_SVD:
+        # 修正: oversamplingが行列サイズを超えないよう制限する。
+        q = min(max(s_hat + 5, 2 * s_hat), rank)
+        U, values, V = torch.svd_lowrank(matrix, q=q)
+        Vh = V.T
+    else:
+        # DE側は既存のCPU float32 SVDを維持する。
+        svd_matrix = matrix.cpu() if DE else matrix
+        U, values, Vh = torch.linalg.svd(svd_matrix, full_matrices=False)
+    # 高速化: diag(S)の確保と余分な行列積を列ごとの積に置換。
+    result = ((U[:, :s_hat] * values[:s_hat]) @ Vh[:s_hat]).to(W.device)
+    if DE:
+        result *= torch.as_tensor(np.sqrt(x), dtype=result.dtype, device=result.device)[:, None]
+        result *= torch.as_tensor(np.sqrt(y), dtype=result.dtype, device=result.device)[None, :]
     if transposed:
-        W_hat = W_hat.T
+        result = result.T
+    # 修正: 全dtypeをfp16上限でclipしていた。異常値を隠さず検出する。
+    if not torch.isfinite(result).all() or result.abs().max() > torch.finfo(W_raw.dtype).max:
+        raise FloatingPointError("LRA result cannot be represented in the weight dtype")
+    return result.to(dtype=W_raw.dtype, device=W_raw.device)
 
-    W_hat = torch.clamp(W_hat, -65504.0, 65504.0)
 
-    if W_hat.shape != W_raw.shape:
-        raise RuntimeError("Shape mismatch after LRA")
-
-    return W_hat.to(dtype)
-
-# ==========================================
-# 補助関数 2: get_lra_model
-# モデルの特定の層の重みを、計算済みのLRA重み行列で置き換える
-# ==========================================
 def get_lra_model(model, layer_name, W_hat_new):
     """
     指定されたLinear層の重みを安全に更新する
@@ -213,7 +125,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
     Returns:
         history_df: 実験結果の推移をまとめたDataFrame
     """
-    results_indexed = results_df.set_index('name')
+    results_indexed = results_df.set_index('name', verify_integrity=True)
     history = []
     
     # 💡 [追加] モデル全体の元のパラメータ数を計算
@@ -231,7 +143,13 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
     })
     
     # 実行するレイヤー数を制限
+    if max_lra_layers < 0:
+        raise ValueError("max_lra_layers must be nonnegative")
     target_layers = lra_list[:max_lra_layers]
+    if len(set(target_layers)) != len(target_layers):
+        raise ValueError("lra_list contains duplicate layers (would double-count savings)")
+    # 高速化: 各stepで全モジュールを探索せず一度だけ辞書化。
+    modules = dict(model.named_modules())
     
     for i, layer_name in enumerate(target_layers):
         step = i + 1
@@ -255,12 +173,7 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         s_hat = int(row[s_col])
         
         # 2. モデルから元の重みを取得
-        target_module = None
-        for name, mod in model.named_modules():
-            if name == layer_name:
-                target_module = mod
-                break
-                
+        target_module = modules.get(layer_name)
         if target_module is None:
             print(f"  [警告] モジュール {layer_name} がモデル内に見つかりません。")
             continue
@@ -280,7 +193,9 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
         
         # --- LRAの適用とPPL計算 ---
         W_hat = apply_lra_1(W_raw, s_hat, DE=DE, fast_SVD=fast_SVD)
-        model = get_lra_model(model, layer_name, W_hat)
+        # 高速化: 既に解決したmoduleへ直接copyし、全moduleの再探索を避ける。
+        with torch.no_grad():
+            target_module.weight.copy_(W_hat)
         if PPLcalc:
             current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
         else:
@@ -302,6 +217,8 @@ def run_lra_experiment(model, tokenizer, results_df, lra_list, max_lra_layers, d
     if PPLcalc == False:
         print("==最終的なPPL==")
         current_ppl = get_ppl(model, tokenizer, dataset_name, seq_len, batch_size)
+        # 修正: 最終PPLを計算するだけで捨てていたため履歴にも保存する。
+        history[-1]['ppl'] = current_ppl
 
     print("\n✅ 実験完了！")
     return pd.DataFrame(history)
@@ -412,590 +329,169 @@ def run_pruning_experiment(
 
 
 
-def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
-    """
-    モデル内の全線形層（Conv2d, Linear）に対してESD関連のメトリクスを計算する関数
-    Args:
-        model (torch.nn.Module): 解析対象のPyTorchモデル（LLaMAなどのLLMも可）
-        pl_fitting (str): べき指数 alpha を計算・フィッティングする手法 
-                          ('median', 'fix-finger', 'goodness-of-fit' )
-        conv_norm (float): 畳み込み層の次元変換時に適用する正規化係数
-        filter_zeros (bool): ゼロや極小な特異値（ノイズ）を事前計算から除外するかどうか
-        bins (int): ヒストグラム計算や fix-finger で使用するビンの数
-
-    Returns:
-        dict: 以下のキーと対応する各層のメトリクス（リスト）を格納した辞書
-
-        [基本指標 (HT-SR理論のShape / Scale Metrics)]
-        - 'name': 解析対象のモジュール（層）名
-        - 'spectral_norm': スペクトルノルム（最大固有値）．層が持つ最大シグナルの絶対的な強さ．
-        - 'entropy': 行列エントロピー．低いほど一部の特異値に情報が集中している（低ランク性が高い）．
-        - 'stable_rank': 安定ランク．フロベニウスノルム^2 / スペクトルノルム^2．
-        - 'weighted_alpha': アルファハット．alpha と spectral_norm を統合したモデル汎化性能の予測指標．scaleに依存する
-        - 'alpha_method': alpha を計算した際の手法の記録．
-        - 'tail_xmin': alpha計算の際にESDのtailが始まっていると判定した値
-        - 'alpha': べき指数．特異値分布の「裾の重さ」．小さいほど有用な特徴を強く学習している．scale不変
-        - 'eigs': 特異値の2乗（固有値）の配列．
-        - 'eigs_num': 固有値の総数．
-
-        [Phase 1: Dyson Equalizer 適用前 (preDE) のRMT指標]
-        - 'sigma2_preDE': BEMAによって推定された，ノイズ成分の分散．
-        - 's_hat_preDE': 閾値を超えた「純粋なシグナル」とみなされる特異値の数．
-        - 's_hat_ratio_preDE': 全特異値数に対するシグナル数 (s_hat) の割合（情報密度）．
-        - 'threshold_preDE': ノイズとシグナルを分離する境界閾値（Tracy-Widom補正込み）．
-        - 'KS_preDE': 実データの経験的CDFと，理論的なMP分布のCDFとのKS距離．
-        - 'mp_soft_rank_preDE': MP Soft Rank = threshold_preDE / eig_max
-
-        [Phase 2: Dyson Equalizer 適用後 (postDE) のRMT指標]
-        - 'sigma2_postDE': DE適用後の重み行列に対する，BEMA推定ノイズ分散．
-        - 's_hat_postDE': DE適用後のシグナル特異値の数．
-        - 's_hat_ratio_postDE': DE適用後のシグナル割合．低ランク近似(LRA)時のランク決定の根拠となる．
-        - 'threshold_postDE': DE適用後のノイズ/シグナル境界閾値．
-        - 'KS_postDE': DE適用後の経験的CDFと，sigma2_postDEを用いた理論的MP分布とのKS距離．
-        - 'KS_postDE_1': DE適用後の経験的CDFと，分散を1.0に固定した理論的MP分布とのKS距離．
-                         (DEによるノイズ分散の均一化が完全に機能したかを確認する指標)
-    """
-    results = {
-        'name': [],
-        'spectral_norm': [],
-        'entropy': [],
-        'stable_rank': [],
-        'weighted_alpha': [],
-        'alpha_method':[],
-        'alpha': [],
-        'tail_xmin':[],
-        'eigs': [],
-        'eigs_num': [],
-        'sigma2_preDE':[],
-        's_hat_preDE':[],
-        's_hat_ratio_preDE': [], 
-        'threshold_preDE':[],
-        'KS_preDE':[],
-        'mp_soft_rank_preDE': [],
-        'sigma2_postDE':[],
-        's_hat_postDE':[],
-        's_hat_ratio_postDE': [], 
-        'threshold_postDE':[],
-        'KS_postDE':[],
-        'KS_postDE_1':[]
-    }
-    
-    # 補助関数
-    def safe_log10(x):
-        return torch.log10(x + 1e-12)
-
-    def matrix_entropy(eigs):
-        p = eigs / torch.sum(eigs)
-        return -torch.sum(p * torch.log(p + 1e-12))
-    
-    # 【高速化】MP分布の累積分布関数（CDF）を計算する内部関数
-    def calc_mp_cdf_fast(evals_sorted, gamma, sigma2):
-        lambda_minus = sigma2 * (1 - math.sqrt(gamma))**2
-        lambda_plus = sigma2 * (1 + math.sqrt(gamma))**2
-        
-        tcdf = np.zeros_like(evals_sorted, dtype=float)
-        current_cdf = 0.0
-        last_x = lambda_minus
-        
-        for i, x in enumerate(evals_sorted):
-            if x <= lambda_minus:
-                tcdf[i] = 0.0
-            elif x >= lambda_plus:
-                tcdf[i] = 1.0
-            else:
-                # LLaMAのような巨大行列でも積分計算が重くならないよう，
-                # 前の固有値から現在の固有値までの区間だけを積分して加算します
-                val, _ = integrate.quad(mp_pdf_zero_excluded, last_x, x, args=(gamma, sigma2), limit=50)
-                current_cdf += val
-                tcdf[i] = current_cdf
-                last_x = x
-                
-        return np.clip(tcdf, 0.0, 1.0) # 積分誤差による1.0超過を防ぐ
-
-    # KSダイバージェンス距離を計算する内部関数
-    def calc_ks_distance(evals_sorted, gamma, sigma2):
-        # 経験的CDF (1/p, 2/p, ..., p/p)
-        ecdf = np.arange(1, len(evals_sorted) + 1) / len(evals_sorted)
-        # 理論的CDF
-        tcdf = calc_mp_cdf_fast(evals_sorted, gamma, sigma2)
-        # KS距離 (経験CDFと理論CDFの最大絶対誤差)
-        return np.max(np.abs(ecdf - tcdf))
-
-    device = next(model.parameters()).device
-
-    model.eval()
-    with torch.no_grad(): # VRAM節約のため必ず勾配計算をオフにする
-        # レイヤーのループ
-        for name, m in model.named_modules():
-            if "lm_head" in name:
-                print(f"Skipping extremely large layer: {name}")
+def _fit_power_law(eigs, method, filter_zeros, bins):
+    # 修正: 対数は正の値だけで計算し、ゼロ行列・定数列は推定不能(NaN)とする。
+    values = eigs[eigs > (1e-8 if filter_zeros else 0)]
+    if len(values) < 2:
+        return np.nan, np.nan
+    logs = np.log(values)
+    N = len(values)
+    tails = np.cumsum(logs[::-1])[::-1]
+    def estimate(i):
+        denom = tails[i] - (N - i) * logs[i]
+        return 1 + (N - i) / denom if denom > 1e-12 else np.nan
+    if method == 'median':
+        i = N // 2
+    elif method == 'fix-finger':
+        # 修正: CUDA非対応のtorch.histogramをCPUのNumPyへ移し、bins引数を反映。
+        hist, edges = np.histogram(values, bins=bins)
+        i = min(np.searchsorted(values, edges[np.argmax(hist)]), max(0, N - 3))
+    else:
+        best, i = np.inf, N // 2
+        for j in range(int(N * .1), min(int(N * .9) + 1, N - 1)):
+            alpha = estimate(j)
+            if not np.isfinite(alpha):
                 continue
-
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
-                print(f"Analyzing layer: {name}")
-                # 重みの取得とデバイス合わせ
-                matrix = m.weight.data.clone().to(device).to(torch.float)
-                
-                if isinstance(m, nn.Conv2d):
-                    matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
-                    # Conv2dの形状調整 (PyTorchのconv重みは (out, in, k, k))
-                    matrix = matrix.transpose(1, 2).transpose(0, 1)
-                
-                # SVD計算
-                # 固有値 λ = σ^2
-                eigs = torch.square(torch.linalg.svdvals(matrix).flatten())
-                eigs, _ = torch.sort(eigs, descending=False)
-                
-                spectral_norm = eigs[-1].item()
-                fnorm = torch.sum(eigs).item()
-                stable_rank = fnorm / (spectral_norm + 1e-8)
-                entropy = matrix_entropy(torch.sqrt(eigs))
-                
-                # Zero filtering
-                if filter_zeros:
-                    nz_eigs = eigs[eigs > 1e-8] # EVALS_THRESH の代用
-                    N = len(nz_eigs)
-                    if N == 0:
-                        nz_eigs = eigs
-                        N = len(nz_eigs)
-                else:
-                    nz_eigs = eigs
-                    N = len(nz_eigs)
-                    
-                log_nz_eigs = torch.log(nz_eigs)
-                
-                # Power Law fitting (alpha)
-                if pl_fitting == 'median':
-                    i = int(len(nz_eigs) / 2) # 元コード xmin_pos=2 を想定
-                    xmin = nz_eigs[i]
-                    n = float(N - i)
-                    seq = torch.arange(n, device=device)
-                    final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
-
-                elif pl_fitting == 'fix-finger':
-                    # --- Fix-finger 法 ---
-                    # ESD(経験的スペクトル密度)のピークを視覚的・経験的に特定し，そこを xmin とする手法
-                    # PyTorchのヒストグラム計算を利用してピークのビンを特定します
-                    hist, bin_edges = torch.histogram(nz_eigs, bins=100)
-                    peak_bin_idx = torch.argmax(hist)
-                    
-                    # ピークとなるビンの左端を閾値 xmin とみなす
-                    xmin_val = bin_edges[peak_bin_idx]
-                    
-                    # nz_eigsは昇順なので，xmin_val以上の最初のインデックス i を取得
-                    i = torch.searchsorted(nz_eigs, xmin_val).item()
-                    
-                    # 全てがノイズとして切り捨てられないよう，最低限の要素数を確保する安全弁
-                    if i >= N - 2:
-                        i = N - 3
-                    
-                    xmin = nz_eigs[i]
-                    n = float(N - i)
-                    final_alpha = 1 + n / (torch.sum(log_nz_eigs[i:]) - n * log_nz_eigs[i])
-
-                elif pl_fitting == 'goodness-of-fit':
-                    # --- Goodness-of-fit (KS距離最小化) 法 ---
-                    # Clausetら(2009)の厳密な手法．すべての xmin 候補に対してモデルと実際のデータの
-                    # コルモゴロフ・スミルノフ(KS)距離を計算し，距離が最小となる xmin を採用します
-                    
-                    best_ks = float('inf')
-                    best_i = int(N / 2)
-                    
-                    # 計算効率化のため，対数の累積和を事前に計算してループ内の合計計算を O(1) にする
-                    cumsum_log = torch.cumsum(log_nz_eigs, dim=0)
-                    total_log_sum = cumsum_log[-1]
-                    
-                    # 端すぎる値(テールの要素数が少なすぎる/多すぎる)を除外するため，
-                    # 実用上は全体の 10% 〜 90% の範囲を探索するのが安定的かつ高速です
-                    start_idx = int(N * 0.1)
-                    end_idx = int(N * 0.9)
-                    
-                    for i in range(start_idx, end_idx):
-                        n_i = float(N - i)
-                        xmin_i = nz_eigs[i]
-                        
-                        # 分母の log_nz_eigs[i:] の合計を累積和から高速に取得
-                        sum_log = total_log_sum - cumsum_log[i-1]
-                        alpha_i = 1.0 + n_i / (sum_log - n_i * log_nz_eigs[i])
-                        
-                        # KS距離の計算
-                        # 経験的CDF (データが小さい順に並んでいるため 1/n, 2/n ... n/n となる)
-                        empirical_cdf = torch.arange(1, int(n_i) + 1, device=device) / n_i
-                        
-                        # 理論的CDF (パレート分布の累積分布関数: 1 - (x / xmin)^(-alpha + 1) )
-                        exponent = -(alpha_i - 1.0)
-                        theoretical_cdf = 1.0 - torch.pow(nz_eigs[i:] / xmin_i, exponent)
-                        
-                        # KS統計量: CDFの差の絶対値の最大値
-                        ks_dist = torch.max(torch.abs(empirical_cdf - theoretical_cdf)).item()
-                        
-                        # 最もKS距離が小さい(適合度が高い)インデックスを記録
-                        if ks_dist < best_ks:
-                            best_ks = ks_dist
-                            best_i = i
-                    
-                    # 最適なインデックスで最終的な alpha を計算
-                    i = best_i
-                    xmin = nz_eigs[i]
-                    n = float(N - i)
-                    sum_log = total_log_sum - cumsum_log[i-1]
-                    final_alpha = 1.0 + n / (sum_log - n * log_nz_eigs[i])
-
-                else:
-                    print("method for alpha is not selected.")
-                    final_alpha = torch.tensor(1.0)
-                    
-                final_alpha_val = final_alpha.item()
-                
-                # weighted_alpha計算
-                final_weighted_alpha = final_alpha_val * safe_log10(torch.tensor(spectral_norm)).item()
-                final_weighted_alpha = math.log(1.0 + math.exp(final_weighted_alpha))
-
-                # Numpy配列への変換
-                Y = matrix.cpu().numpy()
-                
-                # RMTの標準形式 (p <= n になるように転置)
-                p, n = Y.shape
-                if p > n:
-                    Y = Y.T
-                    p, n = Y.shape
-                gamma = p / n
-
-                 # ----------------------------------------------------
-                # [Phase 1] preDE (Dyson Equalizer適用前) の解析
-                # ----------------------------------------------------
-                # BEMAによる推定 (辞書型から値を取り出す)
-                bema_res_pre = bema_algorithm1_from_data(Y)
-                sigma2_pre = bema_res_pre["sigma2_hat"]
-                threshold_pre = bema_res_pre["threshold"]
-                s_hat_pre = bema_res_pre["s_hat"]
-                s_hat_ratio_pre = s_hat_pre / p
-                
-                # 相関行列の固有値 (X = Y Y^T / n) を計算し，昇順ソート
-                X_pre = (Y @ Y.T) / n
-                evals_pre = np.sort(np.linalg.eigvalsh(X_pre).real)
-                
-                # KS距離の計算
-                ks_pre = calc_ks_distance(evals_pre, gamma, sigma2_pre)
-
-                max_eig_pre = np.max(evals_pre) if len(evals_pre) > 0 else 0.0
-
-                if max_eig_pre > 0:
-                    mp_soft_rank_pre = threshold_pre / max_eig_pre
-                else:
-                    mp_soft_rank_pre = np.nan
-
-                # ----------------------------------------------------
-                # [Phase 2] postDE (Dyson Equalizer適用後) の解析
-                # ----------------------------------------------------
-                # DEの適用（Y_hatのみを受け取る）
-                Y_post, _, _ = dyson_equalizer_algorithm1(Y)
-                
-                # BEMAによる推定 (辞書型から値を取り出す)
-                bema_res_post = bema_algorithm1_from_data(Y_post)
-                sigma2_post = bema_res_post["sigma2_hat"]
-                threshold_post = bema_res_post["threshold"]
-                s_hat_post = bema_res_post["s_hat"]
-                s_hat_ratio_post = s_hat_post / p
-                
-                # 固有値の計算と昇順ソート
-                X_post = (Y_post @ Y_post.T) / n
-                evals_post = np.sort(np.linalg.eigvalsh(X_post).real)
-                
-                # KS距離の計算 (BEMA推定分散)
-                ks_post = calc_ks_distance(evals_post, gamma, sigma2_post)
-                # KS距離の計算 (分散=1.0固定)
-                ks_post_1 = calc_ks_distance(evals_post, gamma, 1.0)
-
-                
-                # 結果の保存
-                results['name'].append(name)
-                results['spectral_norm'].append(spectral_norm)
-                results['entropy'].append(entropy.detach().cpu().item())
-                results['stable_rank'].append(stable_rank)
-                results['weighted_alpha'].append(final_weighted_alpha)
-                results['alpha_method'].append(pl_fitting)
-                results['alpha'].append(final_alpha_val)
-                results['tail_xmin'].append(xmin)
-                results['eigs'].append(eigs.detach().cpu().numpy())
-                results['eigs_num'].append(len(eigs))
-
-                results['sigma2_preDE'].append(sigma2_pre)
-                results['s_hat_preDE'].append(s_hat_pre)
-                results['s_hat_ratio_preDE'].append(s_hat_ratio_pre)
-                results['threshold_preDE'].append(threshold_pre)
-                results['KS_preDE'].append(ks_pre)
-                results['mp_soft_rank_preDE'].append(mp_soft_rank_pre)
-                
-                results['sigma2_postDE'].append(sigma2_post)
-                results['s_hat_postDE'].append(s_hat_post)
-                results['s_hat_ratio_postDE'].append(s_hat_ratio_post)
-                results['threshold_postDE'].append(threshold_post)
-                results['KS_postDE'].append(ks_post)
-                results['KS_postDE_1'].append(ks_post_1)
-            
-    return pd.DataFrame(results)
+            cdf = 1 - (values[j:] / values[j]) ** (1 - alpha)
+            count = N - j
+            # 修正: KSは経験CDFのジャンプの前後を両方評価する。
+            distance = max(np.max(np.arange(1, count + 1) / count - cdf),
+                           np.max(cdf - np.arange(count) / count))
+            if distance < best:
+                best, i = distance, j
+    return estimate(i), float(values[i])
 
 
+def _mp_ks(evals, gamma, sigma2):
+    if sigma2 <= 0:
+        return 0.0 if np.all(evals == 0) else np.nan
+    x, cdf = _mp_grid(gamma)
+    theory = np.interp(evals / sigma2, x, cdf, left=0, right=1)
+    N = len(evals)
+    # 修正: 旧実装の右側のみの比較ではKS距離が過小評価される。
+    return float(max(np.max(np.arange(1, N + 1) / N - theory),
+                     np.max(theory - np.arange(N) / N)))
+
+
+@torch.no_grad()
+def get_esd_metrics(model, pl_fitting='median', conv_norm=1.0, filter_zeros=True, bins=100):
+    """Linear/Conv2dのESDを解析。既存の列名・DataFrame形式を維持。
+
+    eigsとspectral_normは従来どおり非正規化の特異値二乗。
+    BEMA/KSはY Y.T/nの固有値。Conv2dはout×(in*kh*kw)へ展開する。
+    """
+    if pl_fitting not in {'median', 'fix-finger', 'goodness-of-fit'}:
+        raise ValueError("Unknown pl_fitting method")
+    if bins < 1 or conv_norm <= 0:
+        raise ValueError("bins and conv_norm must be positive")
+    columns = ['name', 'spectral_norm', 'entropy', 'stable_rank', 'weighted_alpha',
+               'alpha_method', 'alpha', 'tail_xmin', 'eigs', 'eigs_num',
+               'sigma2_preDE', 's_hat_preDE', 's_hat_ratio_preDE', 'threshold_preDE',
+               'KS_preDE', 'mp_soft_rank_preDE', 'sigma2_postDE', 's_hat_postDE',
+               's_hat_ratio_postDE', 'threshold_postDE', 'KS_postDE', 'KS_postDE_1']
+    rows = []
+    # 修正: 重みの解析にeval()/model全体のdevice移動は不要。学習状態を変えない。
+    for name, layer in model.named_modules():
+        if 'lm_head' in name or not isinstance(layer, (nn.Linear, nn.Conv2d)):
+            continue
+        print(f"Analyzing layer: {name}")
+        Y = layer.weight.detach().float().cpu().numpy().astype(np.float64)
+        if isinstance(layer, nn.Conv2d):
+            # 修正: 旧実装は3Dのままp,nに展開して例外になっていた。
+            Y = Y.reshape(Y.shape[0], -1) * np.sqrt(conv_norm)
+        if Y.shape[0] > Y.shape[1]:
+            Y = Y.T
+        if not np.isfinite(Y).all():
+            raise ValueError(f"Non-finite weights: {name}")
+        p, n = Y.shape
+        # 高速化: preDEのSVDをDEにも再利用。Gram行列の重複固有値分解を削除。
+        U, sigma, Vh = np.linalg.svd(Y, full_matrices=False)
+        eigs = np.sort(sigma**2)
+        pre_evals = eigs / n
+        pre = bema_algorithm1_from_eigenvalues(pre_evals, p, n)
+        post_Y, _, _ = _dyson_from_svd(Y, U, sigma, Vh)
+        post_evals = np.sort(np.linalg.svd(post_Y, compute_uv=False)**2) / n
+        post = bema_algorithm1_from_eigenvalues(post_evals, p, n)
+        alpha, xmin = _fit_power_law(eigs, pl_fitting, filter_zeros, bins)
+        norm = float(eigs[-1])
+        total = sigma.sum()
+        probs = sigma / total if total > 0 else np.zeros_like(sigma)
+        positive = probs > 0
+        row = dict(name=name, spectral_norm=norm,
+                   entropy=float(-np.sum(probs[positive] * np.log(probs[positive]))),
+                   stable_rank=float(eigs.sum() / (norm + 1e-8)),
+                   # 修正: log(1+exp(x))のoverflowをlogaddexpで回避。
+                   weighted_alpha=float(np.logaddexp(0, alpha * np.log10(norm + 1e-12))) if np.isfinite(alpha) else np.nan,
+                   alpha_method=pl_fitting, alpha=alpha, tail_xmin=xmin,
+                   eigs=eigs, eigs_num=len(eigs),
+                   mp_soft_rank_preDE=pre['threshold'] / pre_evals[-1] if norm > 0 else np.nan)
+        for label, result, values in [('preDE', pre, pre_evals), ('postDE', post, post_evals)]:
+            row.update({f'sigma2_{label}': result['sigma2_hat'],
+                        f's_hat_{label}': result['s_hat'],
+                        f's_hat_ratio_{label}': result['s_hat'] / p,
+                        f'threshold_{label}': result['threshold'],
+                        f'KS_{label}': _mp_ks(values, p / n, result['sigma2_hat'])})
+        row['KS_postDE_1'] = _mp_ks(post_evals, p / n, 1.0)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
+
+
+@torch.no_grad()
 def apply_lra(model, results, alpha_threshold=2.0, DE=True, fast_SVD=True):
-    """
-    model: LRAを対象にするモデル
-    results: get_esd_metricsをmodelに適用した結果 pd.DataFrame
-    alpha_threshold: 重み行列のalphaでLRAするかどうかの閾値
-    DE: s_hatとしてpostDEを使う
-    fast_SVD: LRAするために実質s_hat分だけSVDできればよい．GPUだとさらに高速
-    """
-    lra_layer_name = []
-    lra_params = {}
-    
-    res_indexed = results.set_index('name')
-    
-    # 対象となる全 Linear 層をリストアップ (tqdmで回すため)
-    target_modules = [(name, mod) for name, mod in model.named_modules() if isinstance(mod, nn.Linear)]
-    
-    print(f"全 {len(target_modules)} 個の Linear 層をスキャン中...")
-    
-    # tqdm でプログレスバーを表示
-    for name, module in tqdm(target_modules, desc="LRA Progress"):
-            
-        if name not in res_indexed.index:
-            lra_params[name] = module.weight.numel()
-            if module.bias is not None:
-                lra_params[name] += module.bias.numel()
+    """α > thresholdのLinearを近似。戻り値(model, names, param_dict)は維持。"""
+    indexed = results.set_index('name', verify_integrity=True)
+    names, params = [], {}
+    for name, layer in model.named_modules():
+        if not isinstance(layer, nn.Linear):
             continue
-
-        row = res_indexed.loc[name]
-        alpha = row['alpha']
-        
-        s_col = 's_hat_postDE' if DE else 's_hat_preDE'
-        if s_col not in row or pd.isna(row[s_col]):
-            lra_params[name] = module.weight.numel()
+        bias_count = layer.bias.numel() if layer.bias is not None else 0
+        params[name] = layer.weight.numel() + bias_count
+        if name not in indexed.index:
             continue
-            
-        s_hat = int(row[s_col])
-        
-        W_raw = module.weight.data
-        m_orig, n_orig = W_raw.shape
-        full_rank = min(m_orig, n_orig)
-        
-        # 圧縮条件の判定
-        if alpha > alpha_threshold and 0 < s_hat < full_rank:
-            lra_layer_name.append(name)
-            
-            device = W_raw.device
-            dtype = W_raw.dtype
-            
-            W_np = W_raw.detach().cpu().to(torch.float32).numpy()
-
-            # W_npにnanなどが入っているとSVDができない
-            W_np = np.asarray(W_np)
-            W_np = np.nan_to_num(W_np, nan=0.0, posinf=0.0, neginf=0.0)
-            W_np = W_np.astype(np.float64, copy=False)
-            W_np = np.ascontiguousarray(W_np)
-
-            # これでもエラー出る場合用の確認
-            # print("layer:", name)
-            # print("shape:", W_np.shape)
-            # print("dtype:", W_np.dtype)
-            # print("finite:", np.isfinite(W_np).all())
-            # print("min/max:", np.min(W_np), np.max(W_np))
-
-            # ---  縦長行列 (m > n) の自動転置 ---
-            # DE関数は m <= n を要求するため、縦長なら転置して横長にする
-            transposed = False
-            if m_orig > n_orig:
-                W_np = W_np.T
-                transposed = True
-
-            # この時点で W_np は必ず m <= n の形状になる
-            m, n = W_np.shape
+        row = indexed.loc[name]
+        rank = row.get('s_hat_postDE' if DE else 's_hat_preDE', np.nan)
+        if pd.isna(rank):
+            continue
+        if int(rank) != rank or not 0 <= rank <= min(layer.weight.shape):
+            raise ValueError(f"Invalid estimated rank for {name}: {rank}")
+        if row['alpha'] > alpha_threshold and 0 < rank < min(layer.weight.shape):
+            # 修正: 重複したSVD処理を共通化しParameter自体は置換しない。
+            layer.weight.copy_(apply_lra_1(layer.weight, int(rank), DE, fast_SVD))
+            names.append(name)
+            # 互換性: この旧APIは独立した特異値ベクトルのr個も数える。
+            params[name] = int(rank) * (sum(layer.weight.shape) + 1) + bias_count
+    return model, names, params
 
 
-            if DE:
-                # 1. Dyson Equalizer
-                Y_hat, x_hat, y_hat = dyson_equalizer_algorithm1(W_np)
-                Y_hat = np.nan_to_num(Y_hat, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                # 2. SVD と 低ランク近似
-                Y_hat_tensor = torch.tensor(Y_hat, device=device, dtype=torch.float32)
-
-                if fast_SVD:
-                    U_approx, S_approx, V_approx = torch.svd_lowrank(Y_hat_tensor, q=s_hat + 10) # Vの出力の仕方が通常のSVDとは違う
-
-                    U_hat = U_approx[:, :s_hat]
-                    S_hat = torch.diag(S_approx[:s_hat])
-                    Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
-                else:
-                    U, S, Vh = torch.linalg.svd(Y_hat_tensor, full_matrices=False)
-
-                    
-                    U_hat = U[:, :s_hat]
-                    S_hat = torch.diag(S[:s_hat])
-                    Vh_hat = Vh[:s_hat, :]
-
-                W_tilde = U_hat @ S_hat @ Vh_hat # 形状: (m, n)
-                
-                # 3. Re-coloring (復元）
-                x_hat_flat = np.asarray(x_hat).flatten()
-                y_hat_flat = np.asarray(y_hat).flatten()
-                
-                
-                eps = 1e-12
-
-                D_x_sqrt = torch.tensor(
-                    np.sqrt(x_hat_flat + eps),
-                    device=device,
-                    dtype=torch.float32
-                )
-
-                D_y_sqrt = torch.tensor(
-                    np.sqrt(y_hat_flat + eps),
-                    device=device,
-                    dtype=torch.float32
-                )
-
-                # ブロードキャスト計算
-                # print("W_tilde.shape:", W_tilde.shape)
-                # print("D_x_sqrt.shape:", D_x_sqrt.shape)
-                # print("D_y_sqrt.shape:", D_y_sqrt.shape)
-                W_hat = W_tilde * D_x_sqrt.unsqueeze(1) * D_y_sqrt.unsqueeze(0)
-                
-            else:
-                # 通常の SVD         
-                W_tensor = torch.tensor(W_np, device=device, dtype=torch.float32)
-                if fast_SVD:
-                    U_approx, S_approx, V_approx = torch.svd_lowrank(W_tensor, q=s_hat + 10) # Vの出力の仕方が通常のSVDとは違う
-
-                    U_hat = U_approx[:, :s_hat]
-                    S_hat = torch.diag(S_approx[:s_hat])
-                    Vh_hat = V_approx[:, :s_hat].T # ここで転置してもとに戻す
-                else:
-                    U, S, Vh = torch.linalg.svd(W_tensor, full_matrices=False)
-
-                    U_hat = U[:, :s_hat]
-                    S_hat = torch.diag(S[:s_hat])
-                    Vh_hat = Vh[:s_hat, :]
-
-                W_hat = U_hat @ S_hat @ Vh_hat
-
-
-            # --- 元の形状に戻す (転置していた場合) ---
-            if transposed:
-                W_hat = W_hat.T
-
-            # 重みの更新
-            # --- safety check before casting ---
-            if not torch.isfinite(W_hat).all():
-                print(f"❌ Non-finite W_hat before cast: {name}")
-                print("nan:", torch.isnan(W_hat).sum().item())
-                print("inf:", torch.isinf(W_hat).sum().item())
-
-                finite = W_hat[torch.isfinite(W_hat)]
-                if finite.numel() > 0:
-                    print("finite min:", finite.min().item())
-                    print("finite max:", finite.max().item())
-                    print("finite max abs:", finite.abs().max().item())
-
-                raise RuntimeError(f"Non-finite W_hat before cast at {name}")
-
-            # --- fp16 overflow check ---
-            if dtype == torch.float16:
-                fp16_max = torch.finfo(torch.float16).max
-                max_abs = W_hat.abs().max().item()
-
-                if max_abs > fp16_max:
-                    print(f"❌ fp16 overflow risk at {name}")
-                    print("max_abs:", max_abs)
-                    print("fp16 max:", fp16_max)
-                    raise RuntimeError(f"fp16 overflow at {name}")
-
-            module.weight.data = W_hat.to(dtype)
-            
-            # 実効パラメータ数の記録
-            lra_params[name] = s_hat * (m_orig + n_orig + 1)
-            if module.bias is not None:
-                lra_params[name] += module.bias.numel()
-                
-        else:
-            lra_params[name] = module.weight.numel()
-            if module.bias is not None:
-                lra_params[name] += module.bias.numel()
-
-    print(f"\n✅ LRA 完了: 全 {len(res_indexed)} 対象層のうち、{len(lra_layer_name)} 層を圧縮しました。")
-    
-    return model, lra_layer_name, lra_params
-
-
-def dyson_equalizer_algorithm1(Y, full_matrices = True):
-    """
-    Landa & Kluger (2024) - Algorithm 1: The Dyson Equalizer
-    論文の数式と記法に完全に対応させた実装．
-
-    Input:
-        Y: Data matrix (m x n), m <= n
-        full_matrices(bool): SVDを完全に行うか　メモリを効率的にしたいならFalse
-    Returns:
-        Y_hat: Normalized data matrix
-        x_hat: Row scaling vector
-        y_hat: Column scaling vector
-    """
+def _dyson_from_svd(Y, U, sigma, Vh):
+    """get_esd_metricsとDEで同じSVDを再利用する内部関数。"""
     m, n = Y.shape
-    if m > n:
-        raise ValueError("Input matrix Y must have m <= n. Transpose Y if necessary.")
-
-    # 1: Compute the SVD of Y
-    # U: m x m, sigma: m, V_h: n x n
-
-    Y = np.asarray(Y)
-    Y = np.nan_to_num(Y, nan=0.0, posinf=0.0, neginf=0.0)
-    Y = Y.astype(np.float64, copy=False)
-    Y = np.ascontiguousarray(Y)
-
-    U, sigma, V_h = np.linalg.svd(Y, full_matrices=full_matrices)
-    V = V_h.T  # V \in R^{n x n} (右特異ベクトルを列に持つ行列)
-
-    # 2: Set eta as the median singular value of Y
     eta = np.median(sigma)
-
-    # 3: Compute the vectors g_hat^(1) and g_hat^(2)
-    # 論文 (3) 式の計算（行列演算で高速化）
+    if eta == 0:
+        if not np.any(sigma):
+            return Y.copy(), np.ones(m), np.ones(n)
+        raise ValueError("DE requires a positive median singular value")
     term1 = eta / (sigma**2 + eta**2)
-    term2 = term1 - (1 / eta)
-
-    # U は m x m, sigma は要素数 m
-    g1_hat = (U**2) @ term1
-
-    # V は n x n. sum は k=1 から m までなので V の最初の m 列を使用
-    g2_hat = (1 / eta) + (V[:, :m]**2) @ term2
-
-    # 4: Compute the vectors x_hat and y_hat
-    # L1ノルム ||g_hat^(1)||_1 と ||g_hat^(2)||_1 の計算
-    g1_norm1 = np.sum(np.abs(g1_hat))
-    g2_norm1 = np.sum(np.abs(g2_hat))
-
-    # 論文 (4) 式の計算
-    denom_x = np.maximum(m - eta * g1_norm1, 1e-12)
-    denom_y = np.maximum(n - eta * g2_norm1, 1e-12)
-
-    # g1_hat, g2_hat が 0 になることによるゼロ除算の防止
-    g1_hat_safe = np.where(np.abs(g1_hat) < 1e-12, 1e-12, g1_hat)
-    g2_hat_safe = np.where(np.abs(g2_hat) < 1e-12, 1e-12, g2_hat)
-
-    x_hat = (1 / np.sqrt(denom_x)) * ((1 / g1_hat_safe) - eta)
-    y_hat = (1 / np.sqrt(denom_y)) * ((1 / g2_hat_safe) - eta)
-
-    # 数値的安定性のための安全策（負値の平方根エラー回避）
-    x_hat = np.maximum(1e-12, x_hat)
-    y_hat = np.maximum(1e-12, y_hat)
-
-    # 5: Form the normalized data matrix Y_hat
-    # Y_hat = (D_{x_hat})^{-1/2} Y (D_{y_hat})^{-1/2}
-    Y_hat = Y / (np.sqrt(x_hat[:, None]) * np.sqrt(y_hat[None, :]))
-
-    return Y_hat, x_hat, y_hat
+    g1 = (U**2) @ term1
+    g2 = 1 / eta + (Vh.T**2) @ (term1 - 1 / eta)
+    dx = max(m - eta * np.sum(np.abs(g1)), 1e-12)
+    dy = max(n - eta * np.sum(np.abs(g2)), 1e-12)
+    x = np.maximum((1 / np.maximum(g1, 1e-12) - eta) / np.sqrt(dx), 1e-12)
+    y = np.maximum((1 / np.maximum(g2, 1e-12) - eta) / np.sqrt(dy), 1e-12)
+    return Y / (np.sqrt(x[:, None]) * np.sqrt(y[None, :])), x, y
 
 
-
+def dyson_equalizer_algorithm1(Y, full_matrices=True):
+    """Dyson Equalizer。戻り値(Y_hat, x_hat, y_hat)。入力はm <= n。"""
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.ndim != 2 or min(Y.shape) == 0 or Y.shape[0] > Y.shape[1]:
+        raise ValueError("Y must be a nonempty matrix with m <= n")
+    if not np.isfinite(Y).all():
+        raise ValueError("Y contains NaN/Inf")
+    # 高速化: 必要なのは右特異ベクトルの先頭m本だけ。n×nのVを作らない。
+    # full_matrices引数は既存Colabとの互換性のため受け付けるが、常にthin SVD。
+    U, sigma, Vh = np.linalg.svd(Y, full_matrices=False)
+    return _dyson_from_svd(Y, U, sigma, Vh)
 
 
 def bema_loss(sigma2_proposal, evals_emp, gamma, p, alpha):
@@ -1005,7 +501,7 @@ def bema_loss(sigma2_proposal, evals_emp, gamma, p, alpha):
         経験的固有値のバルク部分（分位数）との二乗誤差を計算します．
         """
         n = int(p / gamma)
-        L = np.zeros((10, p))
+        L = np.zeros((10, min(p, n)))
         
         # 提案された分散でランダム行列を10回モンテカルロシミュレーション
         for i in range(10):
@@ -1034,6 +530,9 @@ def apply_bema(evals_emp, gamma, p, alpha=0.2):
     """
     BEMAアルゴリズムを実行し，真の分散 sigma^2 を推定します．
     """
+    warnings.warn('apply_bema is the legacy stochastic Monte Carlo fit; '
+                  'use bema_algorithm1_from_eigenvalues for the Colab production path.',
+                  RuntimeWarning, stacklevel=2)
     print("BEMAによる分散推定を実行中...")
     # scipy.optimize.minimize_scalar を用いて，損失関数を最小化する分散を探索
     res = opt.minimize_scalar(
@@ -1122,52 +621,20 @@ def mp_upper_quantiles(gamma, p_tilde, k_indices, grid_size=200000):
 
     k_indices は 1始まりの index を想定．
     """
-    a = (1 - np.sqrt(gamma)) ** 2
-    b = (1 + np.sqrt(gamma)) ** 2
+    if gamma <= 0 or p_tilde <= 0:
+        raise ValueError('gamma and p_tilde must be positive')
+    # 修正: x軸の等間隔積分はgamma=1の端点特異性で精度が落ちる。
+    # theta変換による共通のMP分位点を利用する（gamma>1は非ゼロ部分へ条件付け）。
+    ratio = min(gamma, 1 / gamma)
+    scale = max(gamma, 1.0)
+    return qmp_stable(1 - np.asarray(k_indices, dtype=float) / p_tilde,
+                      1.0, ratio, var=scale, grid_size=grid_size)
 
-    eps = 1e-10
-    x_grid = np.linspace(a + eps, b - eps, grid_size)
-
-    pdf = mp_pdf_zero_excluded(x_grid, gamma, sigma2=1.0)
-
-    # 数値誤差補正のため，台形積分でCDFを作って正規化
-    dx = x_grid[1] - x_grid[0]
-    cdf = np.cumsum(pdf) * dx
-    cdf = cdf / cdf[-1]
-
-    # upper tail probability y = k / p_tilde
-    # F(q_k) = 1 - y
-    y_upper = np.asarray(k_indices, dtype=float) / p_tilde
-    cdf_targets = 1.0 - y_upper
-
-    inv_cdf = interp.interp1d(
-        cdf,
-        x_grid,
-        bounds_error=False,
-        fill_value=(a, b)
-    )
-
-    q = inv_cdf(cdf_targets)
-    return q
-
-def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
-    """
-    RMTstat::qmp(probs, ndf=ndf, pdim=pdim, var=var) 相当．
-    lower.tail=TRUE の下側分位点を返す．
-
-    ndf >= pdim を想定．
-    gamma = pdim / ndf <= 1.
-    gamma=1 の下端特異性を避けるため，theta 変換でCDFを作る．
-    """
-    probs = np.asarray(probs, dtype=float)
-
-    if ndf < pdim:
-        raise ValueError("qmp_stable assumes ndf >= pdim. Use ndf=max(p,n), pdim=min(p,n).")
-
-    gamma = pdim / ndf
-
-    a = var * (1.0 - np.sqrt(gamma)) ** 2
-    b = var * (1.0 + np.sqrt(gamma)) ** 2
+@lru_cache(maxsize=16)
+def _mp_grid(gamma, grid_size=200000):
+    # 高速化: 同じ行列形状で繰り返す20万点のMP積分を再利用。
+    a = (1.0 - np.sqrt(gamma)) ** 2
+    b = (1.0 + np.sqrt(gamma)) ** 2
 
     # x = a + (b-a)(1-cos(theta))/2
     # gamma=1 の x=0 特異性を避ける
@@ -1180,7 +647,7 @@ def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
     denom = np.maximum(x, np.finfo(float).tiny)
 
     pdf = np.sqrt(np.maximum((b - x) * (x - a), 0.0)) / (
-        2.0 * np.pi * gamma * var * denom
+        2.0 * np.pi * gamma * denom
     )
 
     integrand = pdf * dx_dtheta
@@ -1200,8 +667,16 @@ def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
     cdf_unique, idx = np.unique(cdf_all, return_index=True)
     x_unique = x_all[idx]
 
-    probs = np.clip(probs, 0.0, 1.0)
-    return np.interp(probs, cdf_unique, x_unique)
+    return x_unique, cdf_unique
+
+
+def qmp_stable(probs, ndf, pdim, var=1.0, grid_size=200000):
+    """標準MPの下側分位点。旧APIと積分精度を維持する。"""
+    if not 0 < pdim <= ndf or var < 0 or grid_size < 3:
+        raise ValueError("Require 0 < pdim <= ndf, var >= 0, grid_size >= 3")
+    x, cdf = _mp_grid(pdim / ndf, grid_size)
+    return var * np.interp(np.clip(np.asarray(probs, dtype=float), 0, 1), cdf, x)
+
 
 def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
     """
@@ -1218,6 +693,8 @@ def bema_algorithm1_from_eigenvalues(evals, p, n, alpha=0.2, beta=0.1):
             evals = s_i**2 / n
         とする．
     """
+    if p <= 0 or n <= 0 or not 0 <= alpha < 0.5 or not 0 < beta < 1:
+        raise ValueError("Require positive dimensions, 0 <= alpha < .5, 0 < beta < 1")
     evals = np.asarray(evals, dtype=float)
     evals = evals[np.isfinite(evals)]
 
@@ -1341,8 +818,16 @@ def gaussian_broadening_fit(evals, gamma_ratio, a=10):
     論文のセクション2.3に基づく Gaussian Broadening と最小二乗法による sigma^2 の推定
     うまく実装できていないので要修正
     """
+    # 修正: 未検証の旧推定法を確定した結果と誤認しないよう明示する。
+    warnings.warn('gaussian_broadening_fit is experimental and not statistically validated.',
+                  RuntimeWarning, stacklevel=2)
+    if len(evals) < 2 or gamma_ratio <= 0 or a < 1 or int(a) != a:
+        raise ValueError('Need >=2 eigenvalues, positive gamma and integer a >= 1')
+    a = int(a)
     m = len(evals)
-    evals_sorted = np.sort(evals)
+    evals_sorted = np.sort(np.asarray(evals, dtype=float))
+    if not np.isfinite(evals_sorted).all() or np.any(evals_sorted < 0):
+        raise ValueError('Eigenvalues must be finite and nonnegative')
     
     # 1. 局所標準偏差 sigma_k の計算
     sigma_k = np.zeros(m)

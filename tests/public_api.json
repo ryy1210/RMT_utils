@@ -1,0 +1,292 @@
+{
+  "funcs1": {
+    "apply_lra_1": [
+      "W_raw",
+      "s_hat",
+      "DE",
+      "fast_SVD"
+    ],
+    "get_lra_model": [
+      "model",
+      "layer_name",
+      "W_hat_new"
+    ],
+    "get_ppl": [
+      "model",
+      "tokenizer",
+      "dataset_name",
+      "seq_len",
+      "batch_size"
+    ],
+    "run_lra_experiment": [
+      "model",
+      "tokenizer",
+      "results_df",
+      "lra_list",
+      "max_lra_layers",
+      "dataset_name",
+      "DE",
+      "fast_SVD",
+      "PPLcalc",
+      "seq_len",
+      "batch_size"
+    ],
+    "run_pruning_experiment": [
+      "model",
+      "tokenizer",
+      "results_df",
+      "dataset_name",
+      "seq_len",
+      "batch_size",
+      "sparsity",
+      "alpha_prune",
+      "prune_metric",
+      "blockwise",
+      "alpha_reverse"
+    ],
+    "get_esd_metrics": [
+      "model",
+      "pl_fitting",
+      "conv_norm",
+      "filter_zeros",
+      "bins"
+    ],
+    "apply_lra": [
+      "model",
+      "results",
+      "alpha_threshold",
+      "DE",
+      "fast_SVD"
+    ],
+    "dyson_equalizer_algorithm1": [
+      "Y",
+      "full_matrices"
+    ],
+    "bema_loss": [
+      "sigma2_proposal",
+      "evals_emp",
+      "gamma",
+      "p",
+      "alpha"
+    ],
+    "apply_bema": [
+      "evals_emp",
+      "gamma",
+      "p",
+      "alpha"
+    ],
+    "tw1_quantile": [
+      "beta"
+    ],
+    "mp_pdf_zero_excluded": [
+      "x",
+      "gamma",
+      "sigma2"
+    ],
+    "mp_upper_quantiles": [
+      "gamma",
+      "p_tilde",
+      "k_indices",
+      "grid_size"
+    ],
+    "qmp_stable": [
+      "probs",
+      "ndf",
+      "pdim",
+      "var",
+      "grid_size"
+    ],
+    "bema_algorithm1_from_eigenvalues": [
+      "evals",
+      "p",
+      "n",
+      "alpha",
+      "beta"
+    ],
+    "bema_algorithm1_from_data": [
+      "Y",
+      "alpha",
+      "beta",
+      "center"
+    ],
+    "gaussian_broadening_fit": [
+      "evals",
+      "gamma_ratio",
+      "a"
+    ]
+  },
+  "evaluater": {
+    "ppl_eval": [
+      "model",
+      "tokenizer",
+      "datasets",
+      "model_seq_len",
+      "batch_size",
+      "device"
+    ],
+    "ppl_eval2": [
+      "model",
+      "tokenizer",
+      "datasets",
+      "model_seq_len",
+      "batch_size",
+      "device",
+      "log_every"
+    ],
+    "ppl_eval3": [
+      "model",
+      "tokenizer",
+      "datasets",
+      "model_seq_len",
+      "batch_size",
+      "device",
+      "log_every"
+    ],
+    "ppl_eval_large": [
+      "model",
+      "tokenizer",
+      "datasets",
+      "seq_len",
+      "batch_size",
+      "device"
+    ],
+    "eff_eval": [
+      "model",
+      "tokenizer",
+      "dataset",
+      "original_len",
+      "generated_len",
+      "batch_size",
+      "device"
+    ]
+  },
+  "data_utils": {
+    "get_calib_train_data": [
+      "name",
+      "tokenizer",
+      "nsamples",
+      "seqlen",
+      "seed",
+      "batch_size",
+      "dataset_cache_dir"
+    ],
+    "get_wikitext2": [
+      "nsamples",
+      "seed",
+      "seqlen",
+      "tokenizer",
+      "dataset_cache_dir"
+    ],
+    "get_ptb": [
+      "nsamples",
+      "seed",
+      "seqlen",
+      "tokenizer",
+      "dataset_cache_dir"
+    ],
+    "get_c4": [
+      "nsamples",
+      "seed",
+      "seqlen",
+      "tokenizer"
+    ],
+    "get_ptb_new": [
+      "nsamples",
+      "seed",
+      "seqlen",
+      "tokenizer",
+      "dataset_cache_dir"
+    ],
+    "get_c4_new": [
+      "nsamples",
+      "seed",
+      "seqlen",
+      "tokenizer"
+    ],
+    "get_loaders": [
+      "name",
+      "nsamples",
+      "seed",
+      "seqlen",
+      "tokenizer"
+    ],
+    "get_test_data": [
+      "name",
+      "tokenizer",
+      "seq_len",
+      "batch_size"
+    ]
+  },
+  "prune_utils": {
+    "find_layers": [
+      "module",
+      "layers",
+      "name"
+    ],
+    "check_sparsity": [
+      "model"
+    ],
+    "compute_mask": [
+      "W_metric",
+      "prune_granularity",
+      "sparsity"
+    ],
+    "prune_vit_for_vit_pytorch": [
+      "args",
+      "model",
+      "calib_data",
+      "device"
+    ],
+    "prune_vit_ww_for_vit_pytorch": [
+      "args",
+      "model",
+      "calib_data",
+      "device"
+    ],
+    "prune_vit_blockwise_for_vit_pytorch": [
+      "args",
+      "model",
+      "calib_data",
+      "device"
+    ],
+    "compute_mask_2": [
+      "W_metric",
+      "sparsity"
+    ],
+    "alpha_prune_llama": [
+      "model",
+      "results_df",
+      "sparsity",
+      "alpha_prune",
+      "prune_metric",
+      "blockwise",
+      "alpha_reverse"
+    ]
+  },
+  "LoRA": {
+    "wikitext2": [],
+    "ptb": [],
+    "apply_lora": [
+      "model",
+      "tokenizer",
+      "batch_size",
+      "micro_batch_size",
+      "cutoff_len",
+      "add_eos_token",
+      "lora_r",
+      "lora_alpha",
+      "lora_target_modules",
+      "lora_dropout",
+      "val_set_size",
+      "data_path",
+      "num_epochs",
+      "learning_rate",
+      "output_dir",
+      "group_by_length",
+      "extra_val_dataset"
+    ],
+    "main": [
+      "args"
+    ]
+  }
+}

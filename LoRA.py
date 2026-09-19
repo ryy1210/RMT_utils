@@ -6,6 +6,7 @@ https://github.com/tloen/alpaca-lora/blob/main/finetune.py
 import os
 import sys
 import argparse
+import inspect
 from typing import List
 
 import torch
@@ -18,7 +19,7 @@ from peft import (
     LoraConfig,
     get_peft_model,
     get_peft_model_state_dict,
-    prepare_model_for_int8_training,
+    prepare_model_for_kbit_training,
     set_peft_model_state_dict,
 )
 from Prompter import Prompter, ZeroPrompter
@@ -40,13 +41,17 @@ def apply_lora(model, tokenizer, batch_size=64, micro_batch_size=4, cutoff_len=2
             lora_dropout=0.05, val_set_size=2000, data_path="yahma/alpaca-cleaned",num_epochs=2, learning_rate=1e-4, 
             output_dir="Checkpoints/tune", group_by_length=False, extra_val_dataset=None):
 
+    if micro_batch_size <= 0 or batch_size < micro_batch_size or batch_size % micro_batch_size:
+        raise ValueError('batch_size must be a positive multiple of micro_batch_size')
     gradient_accumulation_steps = batch_size // micro_batch_size
     prompter = ZeroPrompter()
 
-    if device == 'cuda':
+    if device == 'cuda' and not (getattr(model, 'is_loaded_in_8bit', False) or getattr(model, 'is_loaded_in_4bit', False)):
         model.half()
 
-    tokenizer.pad_token_id = 0
+    # 修正: token 0を勝手にpadへ変更せず、既存設定を優先。
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
 
     def tokenize(prompt, add_eos_token=True):
@@ -58,7 +63,7 @@ def apply_lora(model, tokenizer, batch_size=64, micro_batch_size=4, cutoff_len=2
             return_tensors=None,
         )
         if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
+            (not result["input_ids"] or result["input_ids"][-1] != tokenizer.eos_token_id)
             and len(result["input_ids"]) < cutoff_len
             and add_eos_token
         ):
@@ -109,7 +114,9 @@ def apply_lora(model, tokenizer, batch_size=64, micro_batch_size=4, cutoff_len=2
         return test_set
 
     # Prepare For LoRA
-    model = prepare_model_for_int8_training(model)
+    # 修正: 現行PEFT APIを使い、非量子化モデルへ量子化前処理を強制しない。
+    if getattr(model, 'is_loaded_in_8bit', False) or getattr(model, 'is_loaded_in_4bit', False):
+        model = prepare_model_for_kbit_training(model)
     config = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
@@ -155,11 +162,13 @@ def apply_lora(model, tokenizer, batch_size=64, micro_batch_size=4, cutoff_len=2
             warmup_steps=100,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
-            fp16=True,
+            fp16=(device == 'cuda'),
             logging_steps=10,
             logging_first_step=True,
             optim="adamw_torch",
-            evaluation_strategy="steps",
+            # 修正: Transformersの旧/新引数名を実行環境に合わせる。
+            **{('eval_strategy' if 'eval_strategy' in inspect.signature(transformers.TrainingArguments).parameters
+                else 'evaluation_strategy'): 'steps'},
             save_strategy="steps",
             eval_steps=100,
             save_steps=200,
@@ -184,27 +193,34 @@ def apply_lora(model, tokenizer, batch_size=64, micro_batch_size=4, cutoff_len=2
         )
     ).__get__(model, type(model))
 
-    trainer.train()
-    model.state_dict = old_state_dict
+    # 修正: 学習失敗時もstate_dictのmonkey patchを必ず解除。
+    try:
+        trainer.train()
+    finally:
+        model.state_dict = old_state_dict
     return model
 
 def main(args):
     # Set WanDB
     os.environ["WANDB_PROJECT"] = args.wandb_project
 
-    # Load Pruned Model
-    pruned_dict = torch.load(args.prune_model, map_location='cpu')
+    # Load Pruned Model: model/tokenizerオブジェクトを含む、自分が作成した信頼できるpickle専用。
+    pruned_dict = torch.load(args.prune_model, map_location='cpu', weights_only=False)
     tokenizer, model = pruned_dict['tokenizer'], pruned_dict['model']
+    if args.micro_batch_size <= 0 or args.batch_size < args.micro_batch_size or args.batch_size % args.micro_batch_size:
+        raise ValueError('batch_size must be a positive multiple of micro_batch_size')
     gradient_accumulation_steps = args.batch_size // args.micro_batch_size
     if not args.no_instruction:
         prompter = Prompter(args.prompt_template_name)
     else:
         prompter = ZeroPrompter()
 
-    if device == 'cuda':
+    if device == 'cuda' and not (getattr(model, 'is_loaded_in_8bit', False) or getattr(model, 'is_loaded_in_4bit', False)):
         model.half()
 
-    tokenizer.pad_token_id = 0
+    # 修正: token 0を勝手にpadへ変更せず、既存設定を優先。
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
 
     def tokenize(prompt, add_eos_token=True):
@@ -216,7 +232,7 @@ def main(args):
             return_tensors=None,
         )
         if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
+            (not result["input_ids"] or result["input_ids"][-1] != tokenizer.eos_token_id)
             and len(result["input_ids"]) < args.cutoff_len
             and add_eos_token
         ):
@@ -268,7 +284,9 @@ def main(args):
         return test_set
 
     # Prepare For LoRA
-    model = prepare_model_for_int8_training(model)
+    # 修正: 現行PEFT APIを使い、非量子化モデルへ量子化前処理を強制しない。
+    if getattr(model, 'is_loaded_in_8bit', False) or getattr(model, 'is_loaded_in_4bit', False):
+        model = prepare_model_for_kbit_training(model)
     config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -314,11 +332,13 @@ def main(args):
             warmup_steps=100,
             num_train_epochs=args.num_epochs,
             learning_rate=args.learning_rate,
-            fp16=True,
+            fp16=(device == 'cuda'),
             logging_steps=10,
             logging_first_step=True,
             optim="adamw_torch",
-            evaluation_strategy="steps",
+            # 修正: Transformersの旧/新引数名を実行環境に合わせる。
+            **{('eval_strategy' if 'eval_strategy' in inspect.signature(transformers.TrainingArguments).parameters
+                else 'evaluation_strategy'): 'steps'},
             save_strategy="steps",
             save_safetensors=False,
             eval_steps=100,
@@ -344,9 +364,10 @@ def main(args):
         )
     ).__get__(model, type(model))
 
-    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
-
-    model.state_dict = old_state_dict
+    try:
+        trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    finally:
+        model.state_dict = old_state_dict
     model.save_pretrained(args.output_dir, safe_serialization=False)
 
 

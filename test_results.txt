@@ -1,0 +1,16 @@
+.............................                                            [100%]
+=============================== warnings summary ===============================
+../../../../../../../../private/tmp/rmt-review-venv/lib/python3.9/site-packages/urllib3/__init__.py:35
+  /private/tmp/rmt-review-venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+    warnings.warn(
+
+tests/test_regressions.py::test_lora_helper_training
+  /private/tmp/rmt-review-venv/lib/python3.9/site-packages/torch/utils/data/dataloader.py:666: UserWarning: 'pin_memory' argument is set as true but no accelerator is found, then device pinned memory won't be used.
+    warnings.warn(warn_msg)
+
+tests/test_regressions.py::test_lora_helper_training
+  /private/tmp/rmt-review-venv/lib/python3.9/site-packages/peft/utils/save_and_load.py:286: UserWarning: Could not find a config file in  - will assume that the vocabulary was not modified.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+29 passed, 3 warnings in 6.85s

@@ -19,7 +19,16 @@ class Prompter(object):
     def __init__(self, template_name: str = "", verbose: bool = False):
         self._verbose = verbose
         if not template_name or template_name == 'alpaca':
-            self.template = alpaca_template
+            self.template = alpaca_template.copy()
+        else:
+            # 修正: 未初期化templateで後から落ちる代わりに、JSONを読み検証する。
+            path = template_name if osp.isfile(template_name) else osp.join(osp.dirname(__file__), 'templates', template_name + '.json')
+            with open(path, encoding='utf-8') as stream:
+                self.template = json.load(stream)
+            required = {'prompt_input', 'prompt_no_input', 'response_split'}
+            if not required.issubset(self.template):
+                raise ValueError('Invalid prompt template')
+            self.template.setdefault('description', template_name)
         if self._verbose:
             print(
                 f"Using prompt template {template_name}: {self.template['description']}"
@@ -48,7 +57,8 @@ class Prompter(object):
         return res
 
     def get_response(self, output: str) -> str:
-        return output.split(self.template["response_split"])[1].strip()
+        # 修正: 区切りなしや応答中の再出現でIndexError/切捨てにならない。
+        return output.split(self.template["response_split"], 1)[-1].strip()
 
 
 class ZeroPrompter(object):
@@ -70,9 +80,11 @@ class ZeroPrompter(object):
     ) -> str:
         # returns the full prompt from instruction and optional input
         # if a label (=response, =output) is provided, it's also appended.
-        if instruction[-1] == '.':
+        # 修正: 空のinstructionを許し、[-1]のIndexErrorを防ぐ。
+        instruction = instruction or ''
+        if instruction and instruction[-1] == '.':
             instruction = instruction[:-1] + ':'
-        if instruction[-1] not in ['.', ':', '?', '!']:
+        if instruction and instruction[-1] not in ['.', ':', '?', '!']:
             instruction = instruction + ':'
         instruction += ' '
 

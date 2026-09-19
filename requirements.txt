@@ -1,0 +1,11 @@
+# Colabは既存の環境を使用可能。CUDA用torchは環境に合わせて先に導入する。
+torch>=2.2
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+tqdm>=4.66
+datasets>=2.19
+transformers>=4.50
+peft>=0.15
+accelerate>=1.0
+# 任意: ViTのWeightWatcher解析だけは weightwatcher を追加。

@@ -10,71 +10,55 @@ parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(current_path)
 
 def get_calib_train_data(name, tokenizer, nsamples, seqlen=2048, seed=3, batch_size=1, dataset_cache_dir=None):
-    import random
-    random.seed(seed)
-    cache_file = (
-        f"cache/{name}_{nsamples}_{seqlen}_{seed}_{batch_size}.pt"
-    )
-    nsamples += 1 #############################
-    if not os.path.exists("cache"):
-        os.makedirs("cache")
-    if os.path.exists(cache_file):
-        traindataset = torch.load(cache_file)
-        return traindataset
-    if name == "c4":
-        traindata = load_dataset("json", data_files="utils/c4-train.json")['train']
-        tot_text = "\n\n".join(traindata["text"])
-    elif name == "ptb":
-        traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train', cache_dir=dataset_cache_dir)
-        tot_text = "\n\n".join(traindata["sentence"])
-    elif name == "wikitext2":
-        traindata = load_dataset(
-            'parquet', 
-            data_files={'train': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/train/0000.parquet'},
-            split='train'
-        )
-        tot_text = "\n\n".join(traindata["text"])
+    """nsamples個のtoken列を生成し、最後の端数batchも返す。"""
+    if nsamples < 0 or seqlen < 1 or batch_size < 1:
+        raise ValueError("Invalid sampling dimensions")
+    # 修正: 旧cacheはtokenizerがキーに含まれず、別モデルのtoken IDを再利用した。
+    # 校正データは生成し直し、datasets側のダウンロードcacheのみ利用する。
+    if name == 'wikitext2':
+        data = _wikitext_split('train', dataset_cache_dir)
+        text = data['text']
+    elif name == 'ptb':
+        data = load_dataset('ptb_text_only', 'penn_treebank', split='train', cache_dir=dataset_cache_dir)
+        text = data['sentence']
+    elif name == 'c4':
+        text = load_dataset('json', data_files='utils/c4-train.json')['train']['text']
     else:
-        raise NotImplementedError
-    traindataset = []
-    for s in range(nsamples):
-        i = random.randint(0, len(tot_text) - seqlen - 1)
-        j = i + seqlen * 10
-        trainenc = tokenizer(tot_text[i:j], return_tensors="pt")
-        if trainenc.input_ids.shape[1] < seqlen:
-            s = s - 1
-            continue
-        if s % batch_size == 0:
-            if s != 0:
-                attention_mask = torch.ones_like(inp)
-                traindataset.append({"input_ids": inp, "attention_mask": attention_mask})
-            inp = trainenc.input_ids[:, :seqlen]
-        else:
-            inp = torch.cat((inp, trainenc.input_ids[:, :seqlen]), dim=0)
-    torch.save(traindataset, cache_file)
-    return traindataset
+        raise ValueError(f"Unknown dataset: {name}")
+    ids = tokenizer("\n\n".join(text), return_tensors='pt').input_ids[0]
+    if ids.numel() < seqlen:
+        raise ValueError("Not enough tokens for calibration")
+    rng = random.Random(seed)
+    result = []
+    # 修正: s -= 1ではforループをやり直せないため、token列から直接切り出す。
+    for offset in range(0, nsamples, batch_size):
+        samples = []
+        for _ in range(min(batch_size, nsamples-offset)):
+            start = rng.randint(0, ids.numel()-seqlen)
+            samples.append(ids[start:start+seqlen])
+        batch = torch.stack(samples)
+        result.append({'input_ids': batch, 'attention_mask': torch.ones_like(batch)})
+    return result
 
+
+def _wikitext_split(split, cache_dir=None):
+    return load_dataset('parquet', data_files={split:
+        f'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/{split}/0000.parquet'},
+        split=split, cache_dir=cache_dir)
 
 
 def get_wikitext2(nsamples, seed, seqlen, tokenizer, dataset_cache_dir=None):
-    traindata =traindata = load_dataset(
-            'parquet', 
-            data_files={'train': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/train/0000.parquet'},
-            split='train'
-        )
-    testdata = traindata = load_dataset(
-            'parquet', 
-            data_files={'train': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/train/0000.parquet'},
-            split='test'
-        )
+    # 修正: test読み込み時にtrainを上書きし、trainファイルへtest splitを要求していた。
+    traindata = _wikitext_split('train', dataset_cache_dir)
+    testdata = _wikitext_split('test', dataset_cache_dir)
     trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
     import random
-    random.seed(seed)
+    rng = random.Random(seed)
     trainloader = []
     for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = rng.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -90,10 +74,10 @@ def get_ptb(nsamples, seed, seqlen, tokenizer, dataset_cache_dir=None):
     testenc = tokenizer("\n\n".join(valdata['sentence']), return_tensors='pt')
 
     import random
-    random.seed(seed)
+    rng = random.Random(seed)
     trainloader = []
     for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = rng.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -106,15 +90,18 @@ def get_c4(nsamples, seed, seqlen, tokenizer):
     valdata = load_dataset("json", data_files="utils/c4-validation.json")['train']
 
     import random
-    random.seed(seed)
+    rng = random.Random(seed)
     trainloader = []
     for _ in range(nsamples):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
+        # 修正: 長い文書がないデータで無限ループにならないよう上限を設ける。
+        for attempt in range(1000):
+            i = rng.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        else:
+            raise ValueError('Could not find a document with enough tokens')
+        i = rng.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -122,15 +109,18 @@ def get_c4(nsamples, seed, seqlen, tokenizer):
         trainloader.append((inp, tar))
 
     import random
-    random.seed(0)
+    rng = random.Random(0)
     valenc = []
     for _ in range(256):
-        while True:
-            i = random.randint(0, len(valdata) - 1)
+        # 修正: 長い文書がないデータで無限ループにならないよう上限を設ける。
+        for attempt in range(1000):
+            i = rng.randint(0, len(valdata) - 1)
             tmp = tokenizer(valdata[i]['text'], return_tensors='pt')
             if tmp.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
+        else:
+            raise ValueError('Could not find a document with enough tokens')
+        i = rng.randint(0, tmp.input_ids.shape[1] - seqlen)
         j = i + seqlen
         valenc.append(tmp.input_ids[:, i:j])
     valenc = torch.hstack(valenc)
@@ -152,10 +142,10 @@ def get_ptb_new(nsamples, seed, seqlen, tokenizer, dataset_cache_dir=None):
     testenc = tokenizer(" ".join(testdata['sentence']), return_tensors='pt')
 
     import random
-    random.seed(seed)
+    rng = random.Random(seed)
     trainloader = []
     for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        i = rng.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -168,15 +158,18 @@ def get_c4_new(nsamples, seed, seqlen, tokenizer):
     valdata = load_dataset("json", data_files="utils/c4-validation.json")['train']
 
     import random
-    random.seed(seed)
+    rng = random.Random(seed)
     trainloader = []
     for _ in range(nsamples):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
+        # 修正: 長い文書がないデータで無限ループにならないよう上限を設ける。
+        for attempt in range(1000):
+            i = rng.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] >= seqlen:
                 break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        else:
+            raise ValueError('Could not find a document with enough tokens')
+        i = rng.randint(0, trainenc.input_ids.shape[1] - seqlen)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
         tar = inp.clone()
@@ -203,44 +196,51 @@ def get_loaders(name, nsamples=128, seed=0, seqlen=2048, tokenizer=None):
         if 'new' in name:
             return get_c4_new(nsamples, seed, seqlen, tokenizer)
         return get_c4(nsamples, seed, seqlen, tokenizer)
-    
-    
-    
-def get_test_data(name, tokenizer, seq_len=2048, batch_size = 4):
-    class IndexDataset(Dataset):
-        def __init__(self, tensors):
-            self.tensors = tensors
+    raise ValueError(f'Unknown dataset: {name}')
 
-        def __getitem__(self, index):
-            return self.tensors[index]
 
-        def __len__(self):
-            return len(self.tensors)
-    ####
-    def process_data(samples, tokenizer, seq_len, field_name):
-        test_ids = tokenizer("\n\n".join(samples[field_name]), return_tensors='pt').input_ids[0]
-        test_ids_batch = []
-        nsamples = test_ids.numel() // seq_len
+# 高速化: 同一tokenizer・設定の評価token列をCPUに2件まで保持。
+# 行列ごとのPPL評価でダウンロード確認/tokenizeを繰り返さない。
+from collections import OrderedDict
+_TEST_CACHE = OrderedDict()
 
-        for i in range(nsamples):
-            batch = test_ids[(i * seq_len):((i + 1) * seq_len)]
-            test_ids_batch.append(batch)
-        test_ids_batch = torch.stack(test_ids_batch)
-        return IndexDataset(tensors=test_ids_batch)
-    ####
-    if 'wikitext2' in name:
-        # Hugging Face のバグを回避するため、Parquetファイルから直接ロードする
-        test_data = load_dataset(
-            'parquet', 
-            data_files={'test': 'hf://datasets/Salesforce/wikitext@~parquet/wikitext-2-raw-v1/test/0000.parquet'},
-            split='test'
-        )
-        test_dataset = process_data(test_data, tokenizer, seq_len, 'text')
-    if 'ptb' in name:
-        test_data = load_dataset('ptb_text_only', 'penn_treebank', split='test')
-        test_dataset = process_data(test_data, tokenizer, seq_len, 'sentence')
-    elif 'c4' in name:
-        test_data = load_dataset("json", data_files="utils/c4-validation.json")['train']
-        test_dataset = process_data(test_data[0:2000], tokenizer, seq_len, 'text')
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    return test_loader
+
+def clear_test_data_cache():
+    """tokenizerの語彙/normalizerやデータを変更した場合に呼ぶ。"""
+    _TEST_CACHE.clear()
+
+
+def get_test_data(name, tokenizer, seq_len=2048, batch_size=4):
+    if seq_len < 1 or batch_size < 1:
+        raise ValueError('seq_len and batch_size must be positive')
+    try:
+        size = len(tokenizer)
+    except TypeError:
+        size = None
+    key = (name, id(tokenizer), seq_len, size,
+           repr(getattr(tokenizer, 'special_tokens_map', None)),
+           repr(getattr(tokenizer, 'init_kwargs', None)))
+    if key in _TEST_CACHE:
+        _TEST_CACHE.move_to_end(key)
+        _, tensors = _TEST_CACHE[key]
+    else:
+        if 'wikitext2' in name:
+            data, field = _wikitext_split('test'), 'text'
+        elif 'ptb' in name:
+            data = load_dataset('ptb_text_only', 'penn_treebank', split='test')
+            field = 'sentence'
+        elif 'c4' in name:
+            data = load_dataset('json', data_files='utils/c4-validation.json')['train'][:2000]
+            field = 'text'
+        else:
+            raise ValueError(f'Unknown dataset: {name}')
+        ids = tokenizer("\n\n".join(data[field]), return_tensors='pt').input_ids[0].cpu()
+        count = ids.numel() // seq_len
+        if count == 0:
+            raise ValueError(f'{name} has fewer than {seq_len} tokens')
+        # 高速化: Pythonのlist + stackをviewに置換。端数切捨ては旧評価と同じ。
+        tensors = ids[:count * seq_len].reshape(count, seq_len)
+        _TEST_CACHE[key] = (tokenizer, tensors)
+        while len(_TEST_CACHE) > 2:
+            _TEST_CACHE.popitem(last=False)
+    return torch.utils.data.DataLoader(tensors, batch_size=batch_size, shuffle=False)

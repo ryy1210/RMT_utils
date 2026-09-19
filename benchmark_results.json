@@ -1,0 +1,17 @@
+{
+  "python": "3.9.6",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "matrix_shape": [
+    64,
+    1024
+  ],
+  "median_of": 3,
+  "full_svd_seconds": 0.02650533399999988,
+  "thin_svd_seconds": 0.004364375000000198,
+  "svd_speedup": 6.073111041099511,
+  "right_vector_bytes_full": 8388608,
+  "right_vector_bytes_thin": 524288,
+  "mp_20_calls_uncached_seconds": 0.13216516700000058,
+  "mp_20_calls_cached_seconds": 0.00011441599999972851,
+  "mp_reuse_speedup": 1155.128364916744
+}

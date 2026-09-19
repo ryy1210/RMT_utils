@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn 
 import os
 import numpy as np
-import weightwatcher as ww
+# 修正: WeightWatcherはViTの指標解析時だけ必要。LLM importを妨げない。
+
 from layerwrapper import WrappedLayer 
 
 def find_layers(module, layers=[nn.Linear], name=''):
     """
     指定されたモジュール内から、nn.Linearなどの対象層を再帰的に抽出して辞書で返す関数
     """
-    if type(module) in layers:
+    if isinstance(module, tuple(layers)):
         return {name: module}
     res = {}
     for name1, child in module.named_children():
@@ -35,18 +36,13 @@ def compute_mask(W_metric, prune_granularity, sparsity):
     """
     計算された重要度スコア（W_metric）に基づいて、下位（sparsity）の要素をゼロにするためのマスクを生成する関数
     """
-    if sparsity <= 0:
-        return torch.zeros_like(W_metric, dtype=torch.bool)
-    if sparsity >= 1:
-        return torch.ones_like(W_metric, dtype=torch.bool)
-        
-    thres = torch.sort(W_metric.flatten().cuda())[0][int(W_metric.numel() * sparsity)].cpu()
-    W_mask = (W_metric <= thres)
-    return W_mask 
+    # 修正: full sort/CUDA固定/同値の過剰削除を避ける。True=削除は維持。
+    return ~compute_mask_2(W_metric, sparsity)
 
 # =========================================================================
 # 1. 一律枝刈り（Uniform Pruning）用関数
 # =========================================================================
+@torch.no_grad()
 def prune_vit_for_vit_pytorch(args, model, calib_data, device):
     """
     vit_pytorchの実装構造に適合させた、一律(Uniform)に各層を同じ割合で枝刈りする関数．
@@ -68,7 +64,7 @@ def prune_vit_for_vit_pytorch(args, model, calib_data, device):
     inps = model.to_patch_embedding(inps)
     cls_tokens = model.cls_token.expand(bs, -1, -1)
     inps = torch.cat((cls_tokens, inps), dim=1)
-    inps = inps + model.pos_embedding
+    inps = inps + model.pos_embedding[:, :inps.shape[1]]
     inps = model.dropout(inps)
 
     for block_id, blk in enumerate(model.transformer.layers):
@@ -123,6 +119,7 @@ def prune_vit_for_vit_pytorch(args, model, calib_data, device):
 # =========================================================================
 # 2. RMT指標を用いた不均衡枝刈り（AlphaPruning / OWL）用関数
 # =========================================================================
+@torch.no_grad()
 def prune_vit_ww_for_vit_pytorch(args, model, calib_data, device):
     """
     vit_pytorchの実装構造に完全に適合させた、WeightWatcher（RMT指標）ベースの不均衡枝刈り関数．
@@ -133,17 +130,18 @@ def prune_vit_ww_for_vit_pytorch(args, model, calib_data, device):
         prunables.append(layers[name].weight.numel())
     prunables = torch.tensor(prunables)
     
-    args.metric_cache = args.metric_cache + f"/{args.model}"
-    if not os.path.exists(args.metric_cache):
-        os.makedirs(args.metric_cache)
+    # 修正: argsを変更すると繰返し呼出しでpathが重複する。
+    metric_cache = os.path.join(args.metric_cache, args.model)
+    os.makedirs(metric_cache, exist_ok=True)
          
-    cache_file = f"{args.metric_cache}/{args.WW_metric}.npy"
+    cache_file = f"{metric_cache}/{args.WW_metric}.npy"
     if os.path.exists(cache_file):
         metrics = np.load(cache_file)
         print(f"Loaded RMT metrics ({args.WW_metric}) from cache.")
     else:
         print("WeightWatcher analysis begin!")
         # 【修正】ModuleListではなく親モジュールを渡して安全に内部スキャンさせます
+        import weightwatcher as ww
         watcher = ww.WeightWatcher(model=model.transformer)
         details = watcher.analyze()
         
@@ -158,6 +156,8 @@ def prune_vit_ww_for_vit_pytorch(args, model, calib_data, device):
         
         np.save(cache_file, metrics)
 
+    if len(metrics) != len(find_layers(model.transformer.layers)) or not np.isfinite(metrics).all():
+        raise ValueError('WeightWatcher metrics do not match Linear layers; regenerate cache')
     scores = torch.tensor(metrics)
     
     # 【修正】Stable Rank の場合は、高い層ほど「削らない」ようにスコアの大小を反転させる
@@ -173,7 +173,9 @@ def prune_vit_ww_for_vit_pytorch(args, model, calib_data, device):
     
     layerwise_pruning_ratios = (((scores - alpha_min) / (alpha_max - alpha_min + 1e-8)) * (2 * args.epsilon) + (1 - args.epsilon))
     scaler = torch.sum(prunables) * args.sparsity / (torch.sum(prunables * layerwise_pruning_ratios) + 1e-8)  
-    layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
+    # 修正: 上限1の制約下でパラメータ予算を再配分。
+    layerwise_pruning_ratios = torch.tensor(_weighted_sparsities(
+        np.maximum(layerwise_pruning_ratios.numpy(), 1e-12), prunables.numpy(), args.sparsity))
     ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
     print("層ごとの動的枝刈り目標レート:", [round(r, 4) for r in ratios])
 
@@ -210,7 +212,7 @@ def prune_vit_ww_for_vit_pytorch(args, model, calib_data, device):
     inps = model.to_patch_embedding(inps)
     cls_tokens = model.cls_token.expand(bs, -1, -1)
     inps = torch.cat((cls_tokens, inps), dim=1)
-    inps = inps + model.pos_embedding
+    inps = inps + model.pos_embedding[:, :inps.shape[1]]
     inps = model.dropout(inps)
 
     i = 0
@@ -270,13 +272,16 @@ def prune_vit_ww_for_vit_pytorch(args, model, calib_data, device):
 # =========================================================================
 # 3. RMT指標を用いたブロック単位の不均衡枝刈り（Block-wise Alpha / OWL）
 # =========================================================================
+@torch.no_grad()
 def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
     """
     vit_pytorchの実装構造に完全に適合させた、Block-wise（ブロック単位）のRMTベース不均衡枝刈り関数．
     同じトランスフォーマーブロック内の4つの全結合層に対して、共通の枝刈り率を割り当てて過剰破壊を防ぎます．
     """
     num_blocks = len(model.transformer.layers) # 6ブロック
-    layers_per_block = 4                      # 1ブロックあたり4つのnn.Linear
+    # 修正: block内Linear数を4と固定せず実際の構造から計算。
+    counts = [len(find_layers(blk)) for blk in model.transformer.layers]
+    offsets = np.r_[0, np.cumsum(counts)]
     
     # 1. 各層のパラメータ数を取得
     all_layer_params = []
@@ -285,17 +290,18 @@ def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
         for name in subset:
             all_layer_params.append(subset[name].weight.numel())
             
-    args.metric_cache = args.metric_cache + f"/{args.model}"
-    if not os.path.exists(args.metric_cache):
-        os.makedirs(args.metric_cache)
+    # 修正: argsを変更すると繰返し呼出しでpathが重複する。
+    metric_cache = os.path.join(args.metric_cache, args.model)
+    os.makedirs(metric_cache, exist_ok=True)
          
     # キャッシュのロードまたはRMT解析
-    cache_file = f"{args.metric_cache}/{args.WW_metric}.npy"
+    cache_file = f"{metric_cache}/{args.WW_metric}.npy"
     if os.path.exists(cache_file):
         metrics = np.load(cache_file)
         print(f"Loaded RMT metrics ({args.WW_metric}) from cache.")
     else:
         print("WeightWatcher analysis begin!")
+        import weightwatcher as ww
         watcher = ww.WeightWatcher(model=model.transformer)
         details = watcher.analyze()
         
@@ -309,6 +315,8 @@ def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
             metrics = np.array(details.alpha)
         np.save(cache_file, metrics)
 
+    if len(metrics) != len(find_layers(model.transformer.layers)) or not np.isfinite(metrics).all():
+        raise ValueError('WeightWatcher metrics do not match Linear layers; regenerate cache')
     scores = torch.tensor(metrics) # 長さ 24
     
     # 2. 【核心】層ごとのスコアとパラメータ数を「ブロック単位」に集約（平均化）する
@@ -316,11 +324,11 @@ def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
     block_prunables = []
     for b in range(num_blocks):
         # そのブロックに属する4層のスコアの平均値をとる
-        b_scores = scores[b * layers_per_block : (b + 1) * layers_per_block]
+        b_scores = scores[offsets[b] : offsets[b + 1]]
         block_scores.append(torch.mean(b_scores))
         
         # そのブロックの総パラメータ数の合計をとる
-        b_params = sum(all_layer_params[b * layers_per_block : (b + 1) * layers_per_block])
+        b_params = sum(all_layer_params[offsets[b] : offsets[b + 1]])
         block_prunables.append(b_params)
         
     block_scores = torch.tensor(block_scores)
@@ -338,7 +346,8 @@ def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
     
     # 全体の総目標スパースティを満たすようにブロック予算をアライメント
     scaler = torch.sum(block_prunables) * args.sparsity / (torch.sum(block_prunables * block_ratios) + 1e-8)  
-    block_ratios = block_ratios * scaler
+    block_ratios = torch.tensor(_weighted_sparsities(
+        np.maximum(block_ratios.numpy(), 1e-12), block_prunables.numpy(), args.sparsity))
     block_ratios_list = block_ratios.cpu().numpy().tolist()
     
     print("ブロックごとの動的枝刈り目標レート (計6ブロック):", [round(r, 4) for r in block_ratios_list])
@@ -369,7 +378,7 @@ def prune_vit_blockwise_for_vit_pytorch(args, model, calib_data, device):
     inps = model.to_patch_embedding(inps)
     cls_tokens = model.cls_token.expand(bs, -1, -1)
     inps = torch.cat((cls_tokens, inps), dim=1)
-    inps = inps + model.pos_embedding
+    inps = inps + model.pos_embedding[:, :inps.shape[1]]
     inps = model.dropout(inps)
 
     for block_id, blk in enumerate(model.transformer.layers):
@@ -442,25 +451,45 @@ def compute_mask_2(W_metric, sparsity):
     Returns:
         torch.Tensor (bool): 残す要素がTrueのマスク
     """
-    if sparsity <= 0:
-        return torch.ones_like(W_metric, dtype=torch.bool)
-    if sparsity >= 1:
+    if not np.isfinite(sparsity) or not 0 <= sparsity <= 1:
+        raise ValueError("sparsity must be between 0 and 1")
+    if not torch.isfinite(W_metric).all():
+        raise ValueError("Pruning metric contains NaN/Inf")
+    flat = W_metric.flatten()
+    k = int(round(sparsity * flat.numel()))
+    keep = torch.ones_like(flat, dtype=torch.bool)
+    if k == flat.numel():
         return torch.zeros_like(W_metric, dtype=torch.bool)
-    
-    # テンソルを1次元に平坦化してソート
-    W_metric_flat = W_metric.flatten()
-    k = int(round(sparsity * W_metric_flat.numel()))
-    
-    if k == 0:
-        return torch.ones_like(W_metric, dtype=torch.bool)
-        
-    # k番目に小さい値を閾値として取得
-    threshold, _ = torch.kthvalue(W_metric_flat, k)
-    
-    # 閾値より大きい要素を残す（True）
-    mask = W_metric > threshold
-    return mask
+    if k:
+        threshold = torch.kthvalue(flat, k).values
+        remove = flat < threshold
+        # 修正: 同値をすべて削除せず、flat index順で不足個数だけ選ぶ。
+        remaining = k - int(remove.sum())
+        tied = (flat == threshold).nonzero(as_tuple=True)[0]
+        remove[tied[:remaining]] = True
+        keep[remove] = False
+    return keep.reshape(W_metric.shape)
 
+
+def _weighted_sparsities(scores, sizes, target):
+    """パラメータ数で重み付けした予算。clip後も目標値を保つ。"""
+    scores = np.asarray(scores, dtype=float)
+    sizes = np.asarray(sizes, dtype=float)
+    if not len(scores) or np.any(~np.isfinite(scores)) or np.any(scores <= 0):
+        raise ValueError('Scores must be finite and positive')
+    if target in (0, 1):
+        return np.full(len(scores), target, dtype=float)
+    lo, hi = 0.0, 1 / scores.min()
+    for _ in range(64):
+        mid = (lo + hi) / 2
+        if np.dot(np.minimum(mid * scores, 1), sizes) < target * sizes.sum():
+            lo = mid
+        else:
+            hi = mid
+    return np.minimum(hi * scores, 1)
+
+
+@torch.no_grad()
 def alpha_prune_llama(model, results_df, sparsity=0.5, alpha_prune=True, 
                      prune_metric="magnitude", blockwise=False, alpha_reverse=False):
     """
@@ -478,113 +507,49 @@ def alpha_prune_llama(model, results_df, sparsity=0.5, alpha_prune=True,
     Returns:
         dict: 実行結果（各層の適用された sparsity などのログ）
     """
-    print(f"--- 枝刈り開始 ---")
-    print(f"Target Sparsity: {sparsity*100:.1f}%, Alpha-based: {alpha_prune}, Metric: {prune_metric}, Blockwise: {blockwise}, alpha_reverse: {alpha_reverse}")
-    
-    # 結果DataFrameの準備
-    if 'name' in results_df.columns:
-        results_df = results_df.set_index('name')
-        
-    log_info = {}
-    
-    # 1. 枝刈り対象の Linear 層をすべて取得
-    # LLaMAの実装に合わせる（HuggingFaceの場合 model.model.layers にブロックが格納されている）
-    try:
-        blocks = model.model.layers
-    except AttributeError:
-        # フォールバック: モデル直下から探す
-        blocks = [model]
-        blockwise = False
-        print("警告: LLaMAの標準ブロック構造が見つからないため、Layerwiseにフォールバックします。")
-
-    for block_idx, block in enumerate(tqdm(blocks, desc="Pruning Blocks")):
-        # ブロック内の全Linear層を取得
-        layer_dict = find_layers(block, layers=[nn.Linear], name=f"model.layers.{block_idx}")
-        
-        if not layer_dict:
-            continue
-            
-        # ----------------------------------------------------
-        # スケジューリング: 各層の sparsity (s_l) を計算
-        # ----------------------------------------------------
-        layer_sparsities = {}
-        
-        if alpha_prune:
-            # --- Alpha Pruning の計算 ---
-            alphas = []
-            valid_names = []
-            
-            # 評価対象の層（ブロックごと、または事前に全体から取得）
-            eval_layers = layer_dict if blockwise else find_layers(model, layers=[nn.Linear])
-            
-            for name in eval_layers:
-                # 実際のモデルの層名と results_df のインデックスの形式合わせ（プレフィックスの調整など）が必要になる場合があります
-                # ここでは部分一致で検索する簡易ロジック
-                matched_row = results_df[results_df.index.str.endswith(name.split('.')[-1])]
-                
-                if not matched_row.empty:
-                    alphas.append(matched_row['alpha'].values[0])
-                    valid_names.append(name)
-            
-            if not alphas:
-                 # fallback to uniform if no alphas found
-                 layer_sparsities = {name: sparsity for name in layer_dict}
-            else:
-                 # Alpha-decay の数式に基づくスパースティの割り当て (Inverse scaling)
-                 # Alphaが大きい(ノイズが多い)層ほど、より多く削る (sparsityを高くする)
-                 alphas = np.array(alphas, dtype=np.float64)
-
-                 eps = 1e-12
-
-                 if alpha_reverse:
-                     alpha_scores = 1.0 / (alphas + eps) # alphaが小さいほど多く枝刈りしたいので逆数にする
-                 else:
-                     alpha_scores = alphas
-                 # softmax的な重み付け、あるいは単純な線形スケーリング
-                 # ここでは layer-wise_pruning の考え方に基づき、alphaに比例したペナルティを課す
-                 alpha_weights = alpha_scores / np.sum(alpha_scores)
-                 
-                 # 目標の平均 sparsity になるように調整
-                 # (実際のパラメータ数の違いはここでは簡略化し、層の数で平均化)
-                 scaled_sparsities = alpha_weights * sparsity * len(alphas)
-                 
-                 # 0~1の範囲にクリッピング
-                 scaled_sparsities = np.clip(scaled_sparsities, 0.0, 0.99)
-                 
-                 # 現在のブロックの辞書に格納
-                 for idx, name in enumerate(valid_names):
-                     if name in layer_dict:
-                         layer_sparsities[name] = scaled_sparsities[idx]
+    if not np.isfinite(sparsity) or not 0 <= sparsity <= 1:
+        raise ValueError('sparsity must be between 0 and 1')
+    if prune_metric not in ('magnitude', 'random'):
+        raise ValueError(f'Unknown prune_metric: {prune_metric}')
+    indexed = results_df.set_index('name', verify_integrity=True) if 'name' in results_df else results_df
+    if not indexed.index.is_unique:
+        raise ValueError('Duplicate names in results_df')
+    # 修正: 架空のmodel.layers接頭辞を付けず、実際の完全な名前を一度だけ列挙。
+    layers = {n: m for n, m in model.named_modules()
+              if isinstance(m, nn.Linear) and 'lm_head' not in n}
+    groups = {}
+    for name in layers:
+        parts = name.split('.')
+        if blockwise and 'layers' in parts:
+            idx = parts.index('layers')
+            group = '.'.join(parts[:idx+2])
         else:
-            # --- Uniform Pruning ---
-            layer_sparsities = {name: sparsity for name in layer_dict}
-
-        # ----------------------------------------------------
-        # マスキングと重みのゼロ化の実行
-        # ----------------------------------------------------
-        for name, layer in layer_dict.items():
-            s_l = layer_sparsities.get(name, sparsity)
-            W_raw = layer.weight.data
-            
-            if prune_metric == "magnitude":
-                # 重みの絶対値を重要度スコアとする（小さいものから削る）
-                W_metric = torch.abs(W_raw)
-            elif prune_metric == "random":
-                # ランダムな値を生成して重要度スコアとする
-                W_metric = torch.rand_like(W_raw)
+            group = 'all'
+        groups.setdefault(group, []).append(name)
+    rates = {}
+    for names in groups.values():
+        scores = []
+        for name in names:
+            if alpha_prune:
+                # 修正: q_proj等の末尾だけでは他blockのalphaを誤使用する。
+                # 完全一致、または一意な全pathのsuffix一致だけを許す。
+                matches = [name] if name in indexed.index else [n for n in indexed.index
+                    if '.' in str(n) and (name.endswith('.' + str(n)) or str(n).endswith('.' + name))]
+                if len(matches) != 1:
+                    raise ValueError(f'Missing or ambiguous alpha for {name}')
+                alpha = float(indexed.loc[matches[0], 'alpha'])
+                if not np.isfinite(alpha) or alpha <= 0:
+                    raise ValueError(f'Invalid alpha for {name}: {alpha}')
+                scores.append(1 / alpha if alpha_reverse else alpha)
             else:
-                raise ValueError(f"Unknown prune_metric: {prune_metric}")
-                
-            # マスクの計算 (残す要素がTrue)
-            mask = compute_mask_2(W_metric, s_l)
-            
-            # In-place で重みにマスクを適用 (ゼロにする)
-            layer.weight.data.mul_(mask)
-            
-            log_info[name] = {
-                "applied_sparsity": s_l,
-                "metric": prune_metric
-            }
-
-    print("--- 枝刈り完了 ---")
+                scores.append(1.0)
+        # 修正: 行列個数平均ではなく重み要素数で目標sparsityを合わせる。
+        values = _weighted_sparsities(scores, [layers[n].weight.numel() for n in names], sparsity)
+        rates.update(zip(names, values))
+    log_info = {}
+    for name, layer in tqdm(layers.items(), desc='Pruning layers'):
+        metric = layer.weight.abs() if prune_metric == 'magnitude' else torch.rand_like(layer.weight)
+        mask = compute_mask_2(metric, rates[name])
+        layer.weight.mul_(mask)
+        log_info[name] = {'applied_sparsity': float(rates[name]), 'metric': prune_metric}
     return model, log_info
