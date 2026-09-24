@@ -169,3 +169,23 @@ CPU上の64×1024行列、3回の中央値ではSVD単体が約26.5ms→4.36ms�
 Google Drive由来のLlama・Gemma・Dyson実験を`notebooks/`に整理しています。
 導入・Colab有料GPU接続・既知の制約は[実行ガイド](docs/notebook_execution.md)を参照してください。
 最初に`notebooks/00_environment_check.ipynb`で小規模な環境確認を行ってください。
+## バルクKSの事後診断（2026-09-24追加）
+
+`notebooks/bulk_ks_diagnostics.ipynb`をVS CodeまたはColabで開きます。
+既定はCPUの小さな人工行列による動作確認です。本番モデルはダウンロードしません。
+`get_bulk_ks`は`λ=s²/n`と固定した分散・閾値を受け取り、閾値以下を再正規化した
+経験CDFとMPのKSを返します。既存`get_esd_metrics`は変更していません。
+
+- 入力: Drive `TUS/hashiguchi/data` のLlama/Gemma ESD pickle。
+- 保存済みKSは`*_saved`、同じ現行計算による全体KSは既存列名、bulkKSは別列。
+- 分散1条件は分散1専用のMP+TW閾値を使い、BEMAのバルクとは区別。
+- 分散推定や閾値探索はしません。ゼロ分散・MP上端より低い閾値は明示的に拒否します。
+- `bulk_diagnostics.py`はSVD、DE、再開、CSV、W&B Table/Artifact保存を担当します。
+- 本番は`MODE='probe'`で少数行列を確認してから`full`に変更します。
+  モデルrevision、元結果との対応、ダウンロード許可の設定が必要です。
+- GPUは自動取得しません。CPU/T4から計測し、必要時だけ増強します。
+  float64のSVDはGPUで必ず高速になるわけではありません。
+- 研究結果の解釈はMP閾値の整合性診断に限定します。KSはp値ではありません。
+  同じ重みのDE前後とバルク比率を比較し、全体KSからの低下だけでDE効果としません。
+
+W&Bは元runを上書きせず、新規診断runに結果を保存します。APIキーはNotebookに保存しません。

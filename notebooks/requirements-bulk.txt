@@ -1,0 +1,9 @@
+-r ../requirements.txt
+wandb>=0.19
+matplotlib>=3.8
+nbformat>=5.10
+nbclient>=0.10
+ipykernel>=6.29
+# 追加: 既存LoRAコードも含む検証済みAPI世代に固定。torchはColabのCUDA版を維持。
+transformers==4.57.6
+peft==0.17.1

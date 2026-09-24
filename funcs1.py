@@ -890,3 +890,29 @@ def gaussian_broadening_fit(evals, gamma_ratio, a=10):
         "mp.pdf":mp_pdf,
         "x_eval":x_eval
     }
+
+def get_bulk_ks(eigenvalues, gamma, sigma2, threshold):
+    """固定したMP・閾値の事後診断。入力は特異値ではなく s_i**2/n。
+
+    分散・閾値を再推定しない。返すKSは検定のp値ではない。
+    thresholdがMP上端より下の場合は、今回の実験と異なるため拒否する。
+    """
+    values = np.asarray(eigenvalues, dtype=np.float64)
+    if values.ndim != 1 or not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError('eigenvalues must be a finite nonnegative 1D array')
+    if not np.isfinite(gamma) or not 0 < gamma <= 1:
+        raise ValueError('Use p <= n and gamma=p/n in (0, 1]')
+    if not np.isfinite(sigma2) or sigma2 <= 0:
+        raise ValueError('sigma2 must be finite and positive')
+    edge = sigma2 * (1 + np.sqrt(gamma))**2
+    if not np.isfinite(threshold) or threshold < edge - 1e-12 * edge:
+        raise ValueError('threshold must be at least the MP upper edge')
+    values = np.sort(values)
+    bulk = values[values <= threshold]
+    # 追加: バルク内でCDFを再正規化。空集合を完全適合と誤解しない。
+    return dict(ks=_mp_ks(bulk, gamma, sigma2) if len(bulk) else np.nan,
+                full_ks=_mp_ks(values, gamma, sigma2) if len(values) else np.nan,
+                n_total=len(values), n_bulk=len(bulk), n_signal=len(values)-len(bulk),
+                bulk_ratio=len(bulk)/len(values) if len(values) else np.nan,
+                sigma2=float(sigma2), threshold=float(threshold), mp_edge=float(edge),
+                status='ok' if len(bulk) else 'empty_bulk')
