@@ -1,0 +1,50 @@
+[
+  {
+    "source_name": "LlaMa-3.2-3B.ipynb",
+    "source_location": "Google Drive / Colab Notebooks",
+    "source_sha256": "0bc8f9f26f68266269a9f0b3395be4bf3da5b3def122534f22a61ddde6488178",
+    "source_bytes": 6710059,
+    "source_cells": 155,
+    "archive": "notebooks/archive/LlaMa-3.2-3B.ipynb",
+    "archive_sha256": "783dfd28d731fcc2987f35f28a660827586dfd1792ff7c248d5eda071ba028d2",
+    "outputs_preserved_in": "Drive original and local ignored .migration-backup",
+    "drive_id": null,
+    "drive_id_status": "Not returned by connector exact-name search; no Drive files deleted."
+  },
+  {
+    "source_name": "LlaMa-3.2-3B-Instract.ipynb",
+    "source_location": "Google Drive / Colab Notebooks",
+    "source_sha256": "391f875a58a1021c9af1e6c102fb1326566b55227434e933327a129e6ae1b3ee",
+    "source_bytes": 343809,
+    "source_cells": 17,
+    "archive": "notebooks/archive/LlaMa-3.2-3B-Instract.ipynb",
+    "archive_sha256": "8c8d3db76da91521653dbb323322c463567780190694c916f02134009b945762",
+    "outputs_preserved_in": "Drive original and local ignored .migration-backup",
+    "drive_id": null,
+    "drive_id_status": "Not returned by connector exact-name search; no Drive files deleted."
+  },
+  {
+    "source_name": "Gemma3-4B.ipynb",
+    "source_location": "Google Drive / Colab Notebooks",
+    "source_sha256": "71fc1d11e56c6b1e1d2508883ecf16a00a7f597ce84516f70b78bb3c70ae186c",
+    "source_bytes": 3092368,
+    "source_cells": 55,
+    "archive": "notebooks/archive/Gemma3-4B.ipynb",
+    "archive_sha256": "fb6dd92c158d5f4935ef6ae34f468a959703682ed348ae58dc6fa867e9a88a68",
+    "outputs_preserved_in": "Drive original and local ignored .migration-backup",
+    "drive_id": null,
+    "drive_id_status": "Not returned by connector exact-name search; no Drive files deleted."
+  },
+  {
+    "source_name": "Dyson.ipynb",
+    "source_location": "Google Drive / Colab Notebooks",
+    "source_sha256": "989386dfd0686c8325dfe73af488ed02849b89cad9b654e806dac4ff8bc2727d",
+    "source_bytes": 391553,
+    "source_cells": 13,
+    "archive": "notebooks/archive/Dyson.ipynb",
+    "archive_sha256": "95f59b50f18c2fcf941fae40bcc5ca1c1b1cc68afdc9cf7a3eb34ff2f1c3c056",
+    "outputs_preserved_in": "Drive original and local ignored .migration-backup",
+    "drive_id": null,
+    "drive_id_status": "Not returned by connector exact-name search; no Drive files deleted."
+  }
+]

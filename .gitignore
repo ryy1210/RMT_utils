@@ -5,3 +5,11 @@ __pycache__/
 cache/
 Checkpoints/
 lora-alpaca/
+.venv/
+.migration-backup/
+.ipynb_checkpoints/
+outputs/
+.env
+.env.*
+!.env.example
+wandb/

@@ -1,0 +1,15 @@
+-r requirements.txt
+# Existing experiment API compatibility; CUDA torch is supplied by Colab.
+transformers>=4.50,<5
+datasets>=2.19,<5
+peft>=0.15,<0.19
+ipykernel>=6
+nbformat>=5.10
+nbclient>=0.10
+nbconvert>=7
+matplotlib>=3.8
+seaborn>=0.13
+wandb>=0.19
+weightwatcher>=0.7
+sentencepiece>=0.2
+pytest>=8

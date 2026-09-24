@@ -163,3 +163,9 @@ CPU上の64×1024行列、3回の中央値ではSVD単体が約26.5ms→4.36ms�
 `apply_bema`は旧モンテカルロ目的関数で評価ごとの乱数による揺らぎがあり、`gaussian_broadening_fit`も統計的妥当性が未検証の試作です。警告を出し、標準のBEMA Algorithm 1と区別しています。TW分位点のfallbackは既存の近似表・補間で、厳密なTW計算ではありません。
 
 不具合修正でαによるpruning配分・KS・PPLが変わり得ます。以前の図表をそのまま新版の結果として扱わず、今後の実験では使用コード版と設定を記録してください。
+
+## 実験ノートブックとVS Code / Colab
+
+Google Drive由来のLlama・Gemma・Dyson実験を`notebooks/`に整理しています。
+導入・Colab有料GPU接続・既知の制約は[実行ガイド](docs/notebook_execution.md)を参照してください。
+最初に`notebooks/00_environment_check.ipynb`で小規模な環境確認を行ってください。
