@@ -916,3 +916,74 @@ def get_bulk_ks(eigenvalues, gamma, sigma2, threshold):
                 bulk_ratio=len(bulk)/len(values) if len(values) else np.nan,
                 sigma2=float(sigma2), threshold=float(threshold), mp_edge=float(edge),
                 status='ok' if len(bulk) else 'empty_bulk')
+
+
+# ======================================================================
+# 実験関数ログ: 2026-10-19 / 04_two_sided_bulk_ks.ipynb
+# 出典: output/bulk_production/04_two_sided_bulk_ks.ipynb の第6セル。
+# ks / bounds / analyze_spectrum は元セルからそのまま転記。
+# 元ノートブックは変更せず、全体・上端除外・両端除外KSの再利用用に保存。
+# 入力 values は固有値 lambda_i = s_i**2/n（特異値そのものではない）。
+# _mp_ks と _mp_grid は上にある既存定義を共用。
+# 下の定数は元ノートブック第3セルの実験設定を保持。
+# matched_upper: 保存済み上端に対応する係数で下端を補正。
+# squeeze_style_c2: 比較用の共通係数2の境界（論文全手順の再現ではない）。
+# 返り値は両方式の辞書のリスト。KSはp値ではない。
+# ======================================================================
+SQUEEZE_C = 2.0
+NEAR_HARD_EDGE_GAP = 10
+
+def ks(values, gamma, variance):
+    values = np.sort(np.asarray(values, dtype=float))
+    return _mp_ks(values, gamma, variance) if len(values) else float('nan')
+
+
+def bounds(p, n, variance, upper_saved, c_shared=2.0):
+    if int(p) != p or int(n) != n or not 0 < p <= n or not np.isfinite(variance) or variance <= 0:
+        raise ValueError('Invalid dimensions or variance')
+    if not np.isfinite(upper_saved) or not np.isfinite(c_shared) or c_shared < 0:
+        raise ValueError('Invalid threshold or correction')
+    gamma = p/n
+    a, b = variance*(1-np.sqrt(gamma))**2, variance*(1+np.sqrt(gamma))**2
+    s_plus = variance*n**(-2/3)*gamma**(-1/6)*(1+np.sqrt(gamma))**(4/3)
+    s_minus = variance*n**(-2/3)*gamma**(-1/6)*(1-np.sqrt(gamma))**(4/3)
+    c = (upper_saved-b)/s_plus
+    if c < -1e-7:
+        raise ValueError('Saved upper threshold is inside MP support')
+    c = max(c, 0.0)
+    status = 'hard_edge' if p == n else ('near_hard_edge_skipped' if n-p <= NEAR_HARD_EDGE_GAP else 'soft_edge')
+    # 追加: 下端は反転TWのためMP下端から補正を引く。上端の尺度を流用しない。
+    lower = max(0.0, a-c*s_minus) if status == 'soft_edge' else 0.0
+    lower_shared = max(0.0, a-c_shared*s_plus) if status == 'soft_edge' else 0.0
+    return a, b, s_minus, s_plus, c, status, [
+        ('matched_upper', lower, upper_saved),
+        ('squeeze_style_c2', lower_shared, b+c_shared*s_plus)]
+
+
+def analyze_spectrum(values, p, n, variance, upper_saved):
+    values = np.sort(np.asarray(values, dtype=float))
+    if values.ndim != 1 or len(values) != p or not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError('Expected p finite, nonnegative normalized eigenvalues')
+    a,b,sm,sp,c,status,intervals = bounds(p,n,variance,upper_saved,SQUEEZE_C)
+    records = []
+    full = ks(values,p/n,variance)
+    for method,lower,upper in intervals:
+        low = values < lower
+        high = values > upper
+        kept = ~(low | high)
+        one = values[~high]
+        bulk = values[kept]
+        assert lower <= a+1e-12 and upper >= b-1e-12
+        # 支持全体を含むため、理論MP CDFを切り詰める必要はない。
+        rec = dict(method=method, lower_threshold=lower, upper_threshold=upper,
+                   mp_lower=a, mp_upper=b, tw_scale_lower=sm, tw_scale_upper=sp,
+                   saved_upper_coefficient=c, lower_edge_status=status,
+                   n_total=len(values), n_low=int(low.sum()), n_high=int(high.sum()), n_bulk=len(bulk),
+                   low_ratio=float(low.mean()), high_ratio=float(high.mean()), bulk_ratio=float(kept.mean()),
+                   fullKS=full, upper_only_bulkKS=ks(one,p/n,variance),
+                   two_sided_bulkKS=ks(bulk,p/n,variance),
+                   status='ok' if len(bulk) else 'empty_bulk')
+        rec['delta_two_minus_upper'] = rec['two_sided_bulkKS']-rec['upper_only_bulkKS']
+        records.append(rec)
+    return records
+
