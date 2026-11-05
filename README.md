@@ -189,3 +189,7 @@ Google Drive由来のLlama・Gemma・Dyson実験を`notebooks/`に整理して�
   同じ重みのDE前後とバルク比率を比較し、全体KSからの低下だけでDE効果としません。
 
 W&Bは元runを上書きせず、新規診断runに結果を保存します。APIキーはNotebookに保存しません。
+
+## 実験ノートブックの一覧
+
+[番号順のノートブック一覧](notebooks/README.md)から、異分散性の乱数実験（07）、bulkKS（02〜05）、LRA・LoRA（06〜09）、KS/PPL分析（10）、10群削除（11）にアクセスできます。

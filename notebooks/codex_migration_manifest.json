@@ -1,0 +1,189 @@
+{
+  "date": "2026-11-05",
+  "executed_on_migration": false,
+  "added": [
+    {
+      "source_relative_to_gpt_output": "bulk_production/00_preflight.ipynb",
+      "destination": "notebooks/bulk_production/00_preflight.ipynb",
+      "source_sha256": "daa15dec62b9fdce90629a97761e11c38a4d200db54cd5cf889aa997863e1ec4",
+      "destination_sha256": "9a3a642fb0a3a25c1e5edb2a21a07e094e112fbb4a8eedae6cc350950f27e438",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/01_colab_setup.ipynb",
+      "destination": "notebooks/bulk_production/01_colab_setup.ipynb",
+      "source_sha256": "a138cefc77ff32642f0bc795ae45398716aba6712e0c354297d046e28fe62a79",
+      "destination_sha256": "22b14142a43b524ceb6f3b9256c5f8a014cc605f6d129e83ed29fa4c049953b9",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/02_gemma_production.ipynb",
+      "destination": "notebooks/bulk_production/02_gemma_production.ipynb",
+      "source_sha256": "193a870be5e1dec59fae1741e2b3f47b48f031d7749ddd5e77b722d4f8573e49",
+      "destination_sha256": "04d006a03209c46bf3f37b5d1c21330ffe92b76a577edb097520e4c29cd417f7",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice",
+        "repository lookup searches working-directory ancestors"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/02_llama_production.ipynb",
+      "destination": "notebooks/bulk_production/02_llama_production.ipynb",
+      "source_sha256": "dd7115a2b2fb34e9253dbb1b91dba43168147b48131e7b8a76798d66fafe1fc2",
+      "destination_sha256": "9b844a3890cc7e9f5fc94169091499fc1abd72647f14108db15980033b798d33",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice",
+        "repository lookup searches working-directory ancestors"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/03_gemma_full.ipynb",
+      "destination": "notebooks/bulk_production/03_gemma_full.ipynb",
+      "source_sha256": "e8e9618255e84ad278bf01c9f2ae9dd3219777e856fed304787e79667ac3fb30",
+      "destination_sha256": "cae67fb2399df65f4fe8aa41509a456bc8889e44e6b75d947bfe37edf4763ac0",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice",
+        "repository lookup searches working-directory ancestors",
+        "correct outdated credential-input description"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/03_llama_full.ipynb",
+      "destination": "notebooks/bulk_production/03_llama_full.ipynb",
+      "source_sha256": "17d67e7bd995e795c7162870d774ac82db331863ce7338172982de16fb584f0c",
+      "destination_sha256": "e4dfe4505efc20fe574147290567e6ec756cb42c3c95bf75f9d36bd27000bc88",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice",
+        "repository lookup searches working-directory ancestors"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/04_two_sided_bulk_ks.ipynb",
+      "destination": "notebooks/bulk_production/04_two_sided_bulk_ks.ipynb",
+      "source_sha256": "850c3e8135b201994dbe71aa79b068618af5ed03ce6303d5cd2423e9b3b31041",
+      "destination_sha256": "0872b50e1c55773a28d028ff18de2f94eafce74b96fd44e1b4b243a9dbbf4e7d",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "bulk_production/05_spectral_histogram_diagnostics.ipynb",
+      "destination": "notebooks/bulk_production/05_spectral_histogram_diagnostics.ipynb",
+      "source_sha256": "38ede70857b94c5aae5ee8b2e07cd2dd90be5e5a6cf12d5379a1e1b01f2843a7",
+      "destination_sha256": "3a1a06746f8627690ad733d3e9b3e3b82eb4fc1ca7b8def308952c10dbe72b69",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "ibis2026/09_2_de_two_edge_module_all.ipynb",
+      "destination": "notebooks/09_2_de_two_edge_module_all.ipynb",
+      "source_sha256": "71cc9de6486a651cbe3b4cd39da5fecfffdadaccb9d20d31eeb17c666cca6aea",
+      "destination_sha256": "ce3c22b17269d3bb95984ce6325020d73abc82c29a4c955042b28350fe3204e4",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "ibis2026/09_3_llama_main_analysis.ipynb",
+      "destination": "notebooks/09_3_llama_main_analysis.ipynb",
+      "source_sha256": "65a8f9cb627736a91d177b2b93946584ea35b734ccb0f1a4634fb2c896240b60",
+      "destination_sha256": "39d979d69b2a3002adab81e22f18855d9d12c8ec17b5aa53e47cba8ebedc1b03",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "ibis2026/09_de_two_edge_lra.ipynb",
+      "destination": "notebooks/09_de_two_edge_lra.ipynb",
+      "source_sha256": "ea4fdebdf16ef3fcd6585ab3644ee4e38a7b73e7b23f31a3433a4ae9dcd979dc",
+      "destination_sha256": "0b4c979d49798cb3ebb2e1a3f4153fd78c0ce9145fa3c6dce65ecd81012cfa52",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "ibis2026/10_bulkks_ppl_association.ipynb",
+      "destination": "notebooks/10_bulkks_ppl_association.ipynb",
+      "source_sha256": "04f93da3e68576fb7ad7331fc89842bc24ea328fea3b2753ee8703cf8e524aae",
+      "destination_sha256": "f0cf3c3da0953767a0c9ab3bbdca27086746029605893118d745ca4765e80a91",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "ibis2026/11_de_decile_module_pruning.ipynb",
+      "destination": "notebooks/11_de_decile_module_pruning.ipynb",
+      "source_sha256": "70d315bfc2875df4128110ec17838aabd9b6e7e7ce73cac3c22486ccb672f757",
+      "destination_sha256": "2cfd5d18fe21f4350a4dd80aeb5c89a310057698c9d00f6bb8043f8c002eddb4",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "poster_spectrum/llama_esd_normalized.ipynb",
+      "destination": "notebooks/analysis/llama_esd_normalized.ipynb",
+      "source_sha256": "96da8bafb72b78a97e6b85a28532649afcd4824fb81c97195ab877b3cf437762",
+      "destination_sha256": "c55ad535ac9b90407424447d1074d4484bedc9f04bc6d2529a68ce31241c4d97",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice"
+      ]
+    },
+    {
+      "source_relative_to_gpt_output": "experiment_review/bulk_validation/bulk_ks_synthetic_executed.ipynb",
+      "destination": "notebooks/validation/bulk_ks_synthetic_validation.ipynb",
+      "source_sha256": "ed01d1c64a532cf0e136ccbe0144013a1228a333d18bd47f6982b28c031769d8",
+      "destination_sha256": "800a681704903cb5f708f403e9574d33959b2290baf211685cdf087bef8d9181",
+      "changes": [
+        "clear outputs, execution counts and UI metadata",
+        "add migration notice",
+        "repository lookup searches working-directory ancestors"
+      ]
+    }
+  ],
+  "not_copied": [
+    {
+      "source": "06_low_ks_lra_finetune.ipynb / low_ks_lra_finetune.ipynb",
+      "canonical": "notebooks/06_low_ks_lra_finetune.ipynb",
+      "reason": "Repository version contains subsequent runtime fixes; older copies not imported."
+    },
+    {
+      "source": "07_de_synthetic_lower_edge.ipynb / 07_de_synthetic_lower_edge_cleaned.ipynb",
+      "canonical": "notebooks/07_de_synthetic_lower_edge.ipynb",
+      "reason": "Current synthetic model code already present; source run flags differ; cleaned copy is an older version."
+    },
+    {
+      "source": "ibis2026/08_de_lra_controlled_experiments.ipynb",
+      "canonical": "notebooks/08_de_lra_controlled_experiments.ipynb",
+      "reason": "Code already identical."
+    },
+    {
+      "source": "ibis2026/08_2_de_lra_all_single_bulk_order.ipynb",
+      "canonical": "notebooks/08_2_de_lra_all_single_bulk_order.ipynb",
+      "reason": "Code already present; only execution flag differs."
+    },
+    {
+      "source": "experiment_review/RMT_utils and experiment_review/evidence",
+      "canonical": "Existing repository and notebooks/experiments",
+      "reason": "Repository snapshot and previously migrated evidence copies; excluded to avoid duplication."
+    }
+  ]
+}
