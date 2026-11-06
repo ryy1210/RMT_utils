@@ -25,8 +25,12 @@
 |10|[KS変化とPPLの関連](10_bulkks_ppl_association.ipynb)|保存済みbulkKSと単一行列LRAの結果を結合|CPU|
 |11|[10群削除の実験](11_de_decile_module_pruning.ipynb)|モジュール別に特異値を10群に分け、DE前後で削除。Llama/Gemma対応|GPU|
 |11_1|[Llamaの10群分析](experiments/11_1_llama_decile_analysis.ipynb)|11の保存済みLlama結果|CPU|
+|11_1（追加検証）|[西川氏条件のPPL・Gemma Q/K設定グリッド](11_1_gemma_qk_ppl_settings_grid.ipynb)|両モデル未圧縮→Gemma Q/K全10群。48評価設定、段階実行・再開対応。[ガイド](../docs/ppl_settings_grid.md)|GPU（本番未実行）|
+|12|[全10群削除とLoRAの順序 × DE](12_de_decile_finetune_order.ipynb)|WikiText-2で削除→学習／学習→削除を比較。MODEL_KEYでLlama/Gemmaを1つ選択|GPU（本番未実行）|
 
 ## その他
+
+- 12の実行・保存・検証範囲：[実行ガイド](../docs/decile_finetune_order.md)
 
 - [bulkKS共通診断](bulk_ks_diagnostics.ipynb)
 - [bulkKSの合成データ検証](validation/bulk_ks_synthetic_validation.ipynb)：小さい乱数行列による実装チェック。07の異分散モデル実験とは別。
