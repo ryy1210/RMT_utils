@@ -13,9 +13,10 @@ for cell in nb.cells:
  if cell.cell_type=='code' and (cell.source.startswith('def sha(') or cell.source.startswith('# 12専用:')):
   exec(compile(cell.source,'notebook_runtime','exec'))
 from transformers import LlamaConfig,LlamaForCausalLM
-SVD_DEVICE='cpu';DECILES=list(range(1,11));SEQ_LEN=16;BATCH_SIZE=1
+SVD_DEVICE='cpu';DECILES=list(range(1,11));SEQ_LEN=16;EVAL_SEQ_LEN=16;TRAIN_SEQ_LEN=16;EVAL_HASH="test-eval";BATCH_SIZE=1
 smoke_test()
 CONFIG_HASH='smoke';TRAIN_BF16=False
+TRAIN_TARGET_MODULES=['up_proj','down_proj','gate_proj','q_proj','k_proj','v_proj','o_proj']
 GROUPS={'UP':['up_proj'],'DOWN':['down_proj'],'GATE':['gate_proj'],'Q':['q_proj'],'K':['k_proj'],'V':['v_proj'],'O':['o_proj']}
 TRAIN=dict(epochs=1,learning_rate=.001,batch=1,accumulation=1,rank=2,alpha=4,dropout=0.,warmup_ratio=0.,save_steps=1,logging_steps=1)
 TRAIN_TOKENS={'tiny':np.random.default_rng(3).integers(0,32,(2,16))};TOKENS=TRAIN_TOKENS
@@ -73,7 +74,7 @@ with tempfile.TemporaryDirectory() as tmp:
   snapshot=dict(calls);run12();assert calls==snapshot
   # 結果破損の検出。黙って完了扱いしない。
   path=job_path('tiny',42,PHASES[0],'GATE',False,1)
-  (path/'losses.npz').write_bytes(b'corrupt')
+  (evaluation_dir(path)/'losses.npz').write_bytes(b'corrupt')
   try:complete_job('tiny',42,PHASES[0],'GATE',False,1)
   except AssertionError:pass
   else:raise AssertionError('corruption not detected')
@@ -87,18 +88,12 @@ for cell in nb.cells:
   node=next(n for n in ast.parse(cell.source).body if isinstance(n,ast.FunctionDef) and n.name=='prepare_data')
   exec(compile(ast.Module(body=[node],type_ignores=[]),'prepare_data','exec'))
 with tempfile.TemporaryDirectory() as tmp:
- OUTPUT_ROOT=Path(tmp);OUTPUT=OUTPUT_ROOT/'gemma';OUTPUT.mkdir()
- LEGACY_OUTPUT=OUTPUT_ROOT/'legacy';LEGACY_OUTPUT.mkdir()
+ OUTPUT=Path(tmp);DATA_ROOT=OUTPUT
  MODELS={'llama':'unused','gemma':'test-gemma'};RUN_MODELS=['gemma'];REVISIONS={'gemma':'fixed'}
- arr=np.ones((2,SEQ_LEN),dtype=np.int64)
- np.save(LEGACY_OUTPUT/'gemma_tokens.npy',arr)
- write_json(LEGACY_OUTPUT/'gemma_tokens.json',dict(sha256=sha(LEGACY_OUTPUT/'gemma_tokens.npy')))
- pin=dict(dataset='Salesforce/wikitext',config='wikitext-2-raw-v1',revision='test')
- write_json(OUTPUT_ROOT/'dataset_revision.json',pin)
- p=OUTPUT/'inputs/gemma_train.npy';p.parent.mkdir();np.save(p,arr)
- identity=dict(model=MODELS['gemma'],revision='fixed',dataset=pin,split='train',seq_len=SEQ_LEN,
-               packing='join newline newline; add_special_tokens=False; disjoint full blocks; drop remainder')
- write_json(p.with_suffix('.json'),dict(identity=identity,sha256=sha(p)))
+ calls=[]
+ def prepare_paper_inputs(key,root,model,revision,length):
+  calls.append((key,length));a=np.ones((2,length),dtype=np.int64)
+  return {'test':(a,{'sha256':'test'}),'train':(a,{'sha256':'train'})}
  prepared=prepare_data()
- assert all(set(d)=={'gemma'} for d in prepared)
- print('PASS single-model input isolation: Gemma selected, no Llama files/network/model required')
+ assert all(set(d)=={'gemma'} for d in prepared) and calls==[('gemma',16)]
+ print('PASS single-model input isolation')
